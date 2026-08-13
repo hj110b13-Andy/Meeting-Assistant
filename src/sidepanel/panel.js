@@ -153,7 +153,7 @@ function renderStatus() {
     // 有字幕的話姓名才抓得到，這點值得講，但不是必要條件
     msg += st.captionsFound ? ' · 字幕提供姓名' : '';
   } else {
-    msg = `${platformName} · 按「▶ 開始聆聽」開始記錄`;
+    msg = `${platformName} · 點工具列的會議助手圖示開始記錄`;
   }
   if (summaryRunning) msg += ' · 產生摘要中';
   $('statusText').textContent = msg;
@@ -618,10 +618,14 @@ async function startListening({ manual = false } = {}) {
     try {
       streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: info.tabId });
     } catch (err) {
+      // 側邊欄的 click 實測不一定被 Chrome 當成有效手勢（錯誤訊息裡會出現
+      // "Chrome pages cannot be captured"，但目標明明是 Meet 分頁）。
+      // 官方文件認可的來源是 chrome.action.onClicked —— 也就是點工具列圖示，
+      // 背景已經在那個脈絡裡自動啟動聆聽。所以這裡把使用者導向那條路。
       const raw = String(err?.message || err);
-      showBanner(/invoked|gesture|activeTab/i.test(raw)
-        ? `無法擷取分頁音訊（${raw}）。請重新整理會議分頁後，再按一次「▶ 開始聆聽」。`
-        : `無法擷取分頁音訊：${raw}`, 15000);
+      showBanner(/invoked|gesture|activeTab|cannot be captured/i.test(raw)
+        ? '請改成：切到會議分頁，然後點一下瀏覽器工具列上的會議助手圖示 —— 那個動作會直接開始聆聽。（Chrome 只接受從工具列圖示發起的擷取）'
+        : `無法擷取分頁音訊：${raw}`, 20000);
       return;
     }
 

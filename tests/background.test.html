@@ -38,7 +38,8 @@ window.chrome = {
     // 記錄下來，才能驗證送去 offscreen 的引擎與模型是對的
     sendMessage: async (m) => { window.__sentToRuntime.push(m); return { ok: true }; },
   },
-  action: { onClicked: { addListener: () => {} } },
+  // 點工具列圖示是 Chrome 唯一穩定認可的手勢來源，音訊擷取靠它啟動
+  action: { onClicked: { addListener: (fn) => { window.__onActionClicked = fn; } } },
   sidePanel: { setPanelBehavior: async () => {}, open: async () => {} },
   storage: { local: { get: async (k) => (k === 'settings' ? { settings: SETTINGS } : {}), set: async () => {} } },
   offscreen: { hasDocument: async () => false, createDocument: async () => {}, closeDocument: async () => {} },
@@ -267,6 +268,26 @@ window.store = window.__module_store;
   const tabInfo = await send({ type: 'ma:meetingTab' });
   check('側邊欄問得到 content script 回報的會議分頁 id',
     tabInfo?.tabId === 77, JSON.stringify(tabInfo));
+
+  // ── 點工具列圖示要直接開始聆聽 ──────────────────────────────
+  // 這是 Chrome 官方認可的手勢來源。側邊欄裡的 click 實測會被拒
+  // （"Chrome pages cannot be captured"），所以真正能動的是這條路。
+  check('有註冊工具列圖示的點擊處理', typeof window.__onActionClicked === 'function');
+  window.__sentToRuntime.length = 0;
+  await window.__onActionClicked({ id: 88, url: 'https://meet.google.com/abc-defg-hij' });
+  await settle(); await settle();
+  check('在會議分頁點圖示會直接開始聆聽',
+    window.__sentToRuntime.some((m) => m.type === 'ma:offscreen:start'),
+    JSON.stringify(window.__sentToRuntime.map((m) => m.type)));
+  await send({ type: 'ma:audio:stop' });
+
+  // 不是會議的分頁就不要亂擷取
+  window.__sentToRuntime.length = 0;
+  await window.__onActionClicked({ id: 89, url: 'https://example.com/' });
+  await settle();
+  check('在非會議分頁點圖示不會啟動擷取',
+    !window.__sentToRuntime.some((m) => m.type === 'ma:offscreen:start'),
+    JSON.stringify(window.__sentToRuntime.map((m) => m.type)));
 
   // ── 聽會議聲音：沒金鑰時要走本機引擎，而不是拒絕 ──────────────
   // streamId 由側邊欄取得後傳進來（使用者手勢不跨 sendMessage 傳到背景）

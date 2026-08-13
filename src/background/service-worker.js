@@ -19,14 +19,34 @@ chrome.tabs?.onRemoved?.addListener((tabId) => {
   if (tabId === meetingTabId) meetingTabId = null;
 });
 
+// **不要開 openPanelOnActionClick。**
+//
+// 那個設定會讓 Chrome 自己開側邊欄，而 `chrome.action.onClicked` **就不會觸發** ——
+// 於是我們失去唯一一個 Chrome 官方認可的手勢來源。tabCapture 需要使用者手勢，
+// 而側邊欄裡的 click 事件實測不被接受（錯誤訊息是
+// "Extension has not been invoked for the current page ... Chrome pages cannot be captured"）。
+// 改成自己在 onClicked 裡開側邊欄，順便在那個手勢脈絡裡把音訊擷取啟動起來。
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
+  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => {});
 });
 chrome.runtime.onStartup.addListener(() => {
-  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
+  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => {});
 });
+
 chrome.action.onClicked.addListener(async (tab) => {
-  try { await chrome.sidePanel.open({ tabId: tab.id }); } catch { /* setPanelBehavior 已處理 */ }
+  try { await chrome.sidePanel.open({ tabId: tab.id }); } catch { /* 開不了就算了，下面照樣試 */ }
+
+  // 點工具列圖示是 Chrome 認可的「叫用擴充功能」動作，這裡的脈絡帶得到手勢。
+  // 在會議分頁上點就直接開始聆聽 —— 使用者不必再找第二顆按鈕。
+  if (!tab?.id || !/^https:\/\/(meet\.google\.com|teams\.(microsoft|live)\.com|meet\.jit\.si|.*\.8x8\.vc)/.test(tab.url || '')) return;
+  try {
+    const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
+    meetingTabId = tab.id;
+    await startAudioFallback(streamId);
+  } catch (err) {
+    // 側邊欄可能還沒開好，訊息廣播不一定收得到 —— 記在 store 裡，開好就看得到
+    reportError(new Error(`無法擷取分頁音訊：${String(err?.message || err)}`));
+  }
 });
 
 // ── 自架 Jitsi：動態註冊內容腳本 ─────────────────────────────────

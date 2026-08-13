@@ -160,16 +160,21 @@ service worker（背景）
 - **原生辨識另開一條 `connectNative`**，不跟 Claude Code 共用。`host.ps1` 是單執行緒循序
   處理訊息，共用的話「啟動辨識伺服器」會排在一個跑了 30 秒的 Claude Code 呼叫後面。
   附帶好處：連線關閉時 `host.ps1` 的 `finally` 會把伺服器一起收掉。
-- **`getMediaStreamId()` 必須由側邊欄呼叫，而且必須在點擊處理函式裡。** 兩個條件缺一不可：
-  1. **要有使用者手勢** —— 計時器觸發的呼叫一定被拒。所以側邊欄有一顆
-     「▶ 開始聆聽」，它存在的唯一理由就是提供那個手勢，不要想把它自動化掉。
-  2. **手勢不會跨 `sendMessage` 傳到 service worker** —— 「按鈕送訊息、背景去呼叫」
-     這種寫法照樣失敗，因為背景那邊沒有手勢。正確做法是側邊欄自己呼叫
-     `chrome.tabCapture.getMediaStreamId()`，再把拿到的 id 傳給背景。
+- **音訊擷取只能從 `chrome.action.onClicked` 啟動**（點工具列圖示）。這是查了三輪才確定的：
 
-  Chrome 對這兩種失敗給的錯誤都是 `Extension has not been invoked for the current page`，
-  聽起來像「權限沒給」，於是很容易繞去點工具列圖示、重新整理分頁、重新載入擴充功能 ——
-  **那些全都沒用**。也試過用 `chrome.scripting.executeScript` 自己補授權，同樣沒用。
+  `chrome.tabCapture.getMediaStreamId()` 要求使用者手勢，而**能被接受的手勢來源很窄**。
+  實測不被接受的有：計時器（顯然）、**側邊欄裡的按鈕 click**、
+  「側邊欄送 sendMessage、背景去呼叫」（手勢不跨情境傳遞）。
+  也試過 `chrome.scripting.executeScript` 自己補授權，沒用。
+
+  **關鍵陷阱：`sidePanel.setPanelBehavior({ openPanelOnActionClick: true })` 會讓
+  `action.onClicked` 不再觸發**，等於把唯一可用的手勢來源關掉。所以那個設定要設成
+  `false`，改在 `onClicked` 裡自己 `sidePanel.open()`，順便在同一個脈絡裡啟動擷取。
+
+  Chrome 對這些失敗給的訊息都是
+  `Extension has not been invoked for the current page (see activeTab permission). Chrome pages cannot be captured.`
+  —— 兩句都會誤導：前半聽起來像權限沒給（於是白繞去重新整理、重新載入擴充功能），
+  後半聽起來像目標分頁選錯（但目標明明是 Meet）。**真正的原因一直都是手勢來源。**
 - **擷取音訊要對著 content script 回報的分頁**（`sender.tab.id`，存在背景的 `meetingTabId`，
   側邊欄用 `ma:meetingTab` 問）。側邊欄是獨立情境，`chrome.tabs.query({active:true})`
   拿到的不一定是會議分頁，猜錯時 tabCapture 永遠失敗，錯誤訊息又跟上面那個一模一樣。

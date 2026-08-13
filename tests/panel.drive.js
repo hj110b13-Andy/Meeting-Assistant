@@ -127,8 +127,8 @@
     JSON.stringify(window.__sent.filter((m) => m.type === 'ma:audio:start')));
   check('還沒開始時顯示「開始聆聽」按鈕',
     !document.querySelector('#btnListen').classList.contains('hidden'));
-  check('狀態列告訴使用者要按那顆按鈕',
-    txt('#statusText').includes('開始聆聽'), txt('#statusText'));
+  check('狀態列告訴使用者怎麼開始（點工具列圖示）',
+    txt('#statusText').includes('工具列'), txt('#statusText'));
 
   // 按下去才會送出擷取請求
   document.querySelector('#btnListen').click();
