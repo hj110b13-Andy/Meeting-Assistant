@@ -20,11 +20,12 @@
     legend { padding: 0 6px; font-weight: 600; font-size: 13px; }
     label { display: block; margin-top: 12px; }
     label > span { display: block; font-size: 12px; color: var(--dim); margin-bottom: 4px; }
-    input[type="text"], textarea {
+    input[type="text"], input[type="number"], textarea {
       width: 100%; font: inherit; padding: 7px 9px; border: 1px solid var(--line);
       border-radius: 6px; background: var(--bg); color: var(--fg);
     }
     textarea { resize: vertical; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
     .hint { font-size: 12px; color: var(--dim); margin: 6px 0 0; }
     button { font: inherit; padding: 8px 18px; border-radius: 7px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
     button.sec { background: transparent; color: var(--accent); }
@@ -59,6 +60,27 @@
       <textarea id="notes" rows="6" placeholder="例：我負責金流後端。Q3 目標是把結帳失敗率降到 1% 以下。目前卡在第三方對帳 API 尚未開通，預計 8/20 完成。"></textarea>
     </label>
     <p class="hint">寫得越具體，回答建議越能直接照唸。不要放密碼或金鑰。</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>摘要更新頻率</legend>
+    <div class="grid">
+      <label>
+        <span>至少累積幾段發言</span>
+        <input id="summaryEverySegments" type="number" min="2" max="50">
+      </label>
+      <label>
+        <span>且距上次至少幾秒</span>
+        <input id="summaryEverySeconds" type="number" min="15" max="1800">
+      </label>
+    </div>
+    <p class="hint">
+      <strong>兩個條件都成立才會更新摘要。</strong>秒數是最短間隔，也就是真正的節流上限：
+      設 300 就是「最多每 5 分鐘一次」，即使中間累積了 50 段也會等到時間到。
+      段數則是「至少要有這麼多新內容才值得跑一次」，避免冷場時為兩句話白跑。<br>
+      預設 8 段 / 300 秒。摘要走 Claude Code，每次呼叫都是一個完整的 CLI session，
+      <strong>秒數設太小會很快吃掉 Claude Pro 的用量額度</strong>，建議不要低於 180。
+    </p>
   </fieldset>
 
   <div class="bar">

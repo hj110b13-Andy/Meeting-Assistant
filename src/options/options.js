@@ -11,11 +11,18 @@ const FIELDS = ['myNames', 'notes', 'jitsiDomains'];
 async function load() {
   const s = await chrome.runtime.sendMessage({ type: 'ma:settings:get' });
   for (const f of FIELDS) if (s[f] !== undefined) $(f).value = s[f];
+  $('summaryEverySegments').value = s.summaryEverySegments;
+  // 內部存毫秒，介面用秒 —— 使用者不必數 0
+  $('summaryEverySeconds').value = Math.round(s.summaryEveryMs / 1000);
 }
 
 $('save').addEventListener('click', async () => {
   const patch = {};
   for (const f of FIELDS) patch[f] = $(f).value.trim();
+  // 夾在合理範圍內：段數太小會為兩句話跑一次，秒數太小會很快吃掉 Pro 額度。
+  // 空白或亂填時回到預設值，而不是存進一個會讓摘要再也不觸發的數字。
+  patch.summaryEverySegments = Math.min(50, Math.max(2, Number($('summaryEverySegments').value) || 8));
+  patch.summaryEveryMs = Math.min(1800, Math.max(15, Number($('summaryEverySeconds').value) || 300)) * 1000;
   await chrome.runtime.sendMessage({ type: 'ma:settings:set', patch });
   $('saved').textContent = '已儲存 ✓';
   setTimeout(() => ($('saved').textContent = ''), 2500);
