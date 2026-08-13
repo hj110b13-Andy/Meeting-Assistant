@@ -26,6 +26,8 @@ const SETTINGS = {
 window.__broadcasts = [];
 window.__fetches = [];
 window.__sentToRuntime = [];
+// 記錄事件先後，用來驗證「先接串流、後啟動辨識伺服器」的順序
+window.__timeline = [];
 let onConnectHandler = null, onMessageHandler = null;
 
 window.chrome = {
@@ -36,7 +38,11 @@ window.chrome = {
     onConnect: { addListener: (fn) => { onConnectHandler = fn; } },
     onMessage: { addListener: (fn) => { onMessageHandler = fn; } },
     // 記錄下來，才能驗證送去 offscreen 的引擎與模型是對的
-    sendMessage: async (m) => { window.__sentToRuntime.push(m); return { ok: true }; },
+    sendMessage: async (m) => {
+      window.__sentToRuntime.push(m);
+      if (m.type === 'ma:offscreen:start') window.__timeline.push('offscreen:start');
+      return { ok: true };
+    },
   },
   // 點工具列圖示是 Chrome 唯一穩定認可的手勢來源，音訊擷取靠它啟動
   action: { onClicked: { addListener: (fn) => { window.__onActionClicked = fn; } } },
@@ -93,6 +99,7 @@ window.chrome.runtime.connectNative = () => {
       else if (m.type === 'sttStatus') {
         auto({ ok: true, installed: true, running: false, dir: 'C:\\x\\whisper', models: ['ggml-small-q5_1.bin'], port: 8317 });
       } else if (m.type === 'sttStart') {
+        window.__timeline.push('sttStart');
         auto(window.__native.failStt
           ? { ok: false, error: '找不到本機辨識程式。請先執行 tools\\install-whisper.ps1。' }
           : { ok: true, reused: false, model: 'ggml-small-q5_1.bin', startMs: 6000, port: 8317 });
@@ -307,9 +314,19 @@ window.store = window.__module_store;
   check('本機引擎不需要金鑰就能啟動', !offStart?.deepgramKey);
   check('已經沒有雲端辨識這條路（不會意外計費）',
     !('deepgramKey' in (offStart || {})), JSON.stringify(Object.keys(offStart || {})));
-  check('有先請橋接把辨識伺服器拉起來',
+  check('有請橋接把辨識伺服器拉起來',
     window.__native.posted.some((m) => m.type === 'sttStart' && m.model === 'small'),
     JSON.stringify(window.__native.posted.map((m) => m.type)));
+
+  // **順序：offscreen 先接串流，辨識伺服器後啟動。**
+  // getMediaStreamId 拿到的 id 幾秒內沒用掉就失效，而 sttEnsure 冷啟動要
+  // 好幾秒。反過來的話 getUserMedia 會拿到過期的 id —— 擷取靜靜失敗，
+  // 狀態卻顯示「聆聽中」，講再多話都沒有逐字稿，也沒有任何錯誤訊息。
+  const offAt = window.__timeline.indexOf('offscreen:start');
+  const sttAt = window.__timeline.indexOf('sttStart');
+  check('先把串流交給 offscreen，再啟動辨識伺服器（串流 id 會過期）',
+    offAt >= 0 && sttAt >= 0 && offAt < sttAt,
+    `順序：${JSON.stringify(window.__timeline)}`);
 
   await send({ type: 'ma:audio:stop' });
   check('停止擷取時會把辨識伺服器收掉（small 模型約 400MB 記憶體）',
@@ -350,8 +367,10 @@ window.store = window.__module_store;
   window.__native.posted.length = 0;
   const offFail = await send({ type: 'ma:audio:start', streamId: 'stream-id' });
   check('offscreen 啟動失敗時回報錯誤', offFail?.ok === false, JSON.stringify(offFail));
-  check('offscreen 啟動失敗時會把已啟動的辨識伺服器收掉',
-    window.__native.posted.some((m) => m.type === 'sttStop'),
+  // 新順序下 offscreen 先接串流、辨識伺服器後啟動，所以這裡根本還沒開伺服器 ——
+  // 不必收掉，也就不會白佔那 400 MB。
+  check('offscreen 失敗時還沒開辨識伺服器（不必收拾）',
+    !window.__native.posted.some((m) => m.type === 'sttStart'),
     JSON.stringify(window.__native.posted.map((m) => m.type)));
   window.chrome.runtime.sendMessage = realSend;
 

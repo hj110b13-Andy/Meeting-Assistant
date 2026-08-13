@@ -683,22 +683,14 @@ async function startAudioFallback(streamId, engineOverride) {
 
   // 只有本機引擎。雲端那條（Deepgram）會按量計費，已整個移除 ——
   // 使用者的要求是只花 Claude Pro 訂閱的錢，留著就有誤觸的可能。
-  let engine = engineOverride || settings.sttEngine || 'whisper-native';
+  const engine = engineOverride || settings.sttEngine || 'whisper-native';
 
-  // 原生辨識要先請 bridge 把 whisper-server 拉起來。裝不起來就退回
-  // 瀏覽器內的 WASM ——「慢一點但有東西」勝過整個功能靜靜地失敗。
-  let sttNote = '';
-  if (engine === 'whisper-native') {
-    try {
-      const r = await sttEnsure(settings.sttNativeModel);
-      if (!r.reused && r.startMs) sttNote = `本機辨識伺服器已啟動（載入模型 ${(r.startMs / 1000).toFixed(1)} 秒）。`;
-    } catch (err) {
-      engine = 'whisper';
-      sttNote = `原生本機辨識無法啟動（${String(err.message || err)}），已改用瀏覽器內建的備援引擎 —— 一樣免費，但較慢且中文準確度較差。想要更好的結果請執行 tools\\install-whisper.ps1。`;
-      broadcast('audioNote', { message: sttNote });
-    }
-  }
-
+  // **順序很重要：先讓 offscreen 把串流接走，再去啟動辨識伺服器。**
+  //
+  // `getMediaStreamId()` 拿到的 id **幾秒內沒被用掉就失效**。原本的順序是
+  // 先跑 sttEnsure（冷啟動載入 small 模型要好幾秒）再交給 offscreen，
+  // 於是 getUserMedia 拿到的是過期的 id —— 擷取靜靜失敗，狀態卻已經
+  // 顯示「聆聽中」，講再多話都不會有逐字稿，而且沒有任何錯誤訊息。
   await ensureOffscreen();
   const res = await chrome.runtime.sendMessage({
     type: 'ma:offscreen:start',
@@ -711,15 +703,34 @@ async function startAudioFallback(streamId, engineOverride) {
       toTraditional: settings.sttTraditional !== false,
     },
   });
-  if (res && res.ok === false) {
+  // 收不到回覆也算失敗：offscreen 沒起來時 sendMessage 會回 undefined，
+  // 當成成功的話就是「安靜地什麼都不做」。
+  if (!res || res.ok === false) {
     await stopAudioFallback();
-    const message = `音訊擷取啟動失敗：${res.error}`;
+    const message = `音訊擷取啟動失敗：${res?.error || 'offscreen 沒有回應'}`;
     reportError(new Error(message));
     return { ok: false, error: message };
   }
-  store.setStatus({ audioFallback: true, sttEngine: engine });
+
+  // 串流已經接住了，現在才去拉辨識伺服器。前幾段音訊會在佇列裡等它就緒。
+  let sttNote = '';
+  let finalEngine = engine;
+  if (engine === 'whisper-native') {
+    try {
+      const r = await sttEnsure(settings.sttNativeModel);
+      if (!r.reused && r.startMs) sttNote = `本機辨識伺服器已啟動（載入模型 ${(r.startMs / 1000).toFixed(1)} 秒）。`;
+    } catch (err) {
+      // 原生起不來就改用瀏覽器內的 WASM。串流已經在跑，只要換掉引擎就好。
+      finalEngine = 'whisper';
+      sttNote = `原生本機辨識無法啟動（${String(err.message || err)}），已改用瀏覽器內建的備援引擎 —— 一樣免費，但較慢且中文準確度較差。想要更好的結果請執行 tools\\install-whisper.ps1。`;
+      broadcast('audioNote', { message: sttNote });
+      await chrome.runtime.sendMessage({ type: 'ma:offscreen:engine', engine: 'whisper' });
+    }
+  }
+
+  store.setStatus({ audioFallback: true, sttEngine: finalEngine });
   broadcast('status', store.getState().status);
-  return { ok: true, engine, note: sttNote };
+  return { ok: true, engine: finalEngine, note: sttNote };
 }
 
 async function stopAudioFallback() {

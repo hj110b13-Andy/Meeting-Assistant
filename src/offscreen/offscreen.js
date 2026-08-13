@@ -66,6 +66,15 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
       .catch((err) => reply({ ok: false, error: String(err.message || err) }));
     return true;
   }
+  // 串流已經接住之後才發現原生辨識起不來。**不能重接串流** —— streamId
+  // 已經用掉了（而且幾秒就過期），所以這裡只把引擎標記換掉並清空佇列，
+  // 由背景告訴使用者發生什麼事。要真的換成 WASM 得重新走一次 start 流程。
+  if (msg?.type === 'ma:offscreen:engine') {
+    engineName = msg.engine;
+    pending.length = 0;
+    reply({ ok: true });
+    return false;
+  }
   if (msg?.type === 'ma:offscreen:stop') {
     stop();
     reply({ ok: true });

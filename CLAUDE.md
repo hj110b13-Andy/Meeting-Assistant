@@ -175,6 +175,13 @@ service worker（背景）
   `Extension has not been invoked for the current page (see activeTab permission). Chrome pages cannot be captured.`
   —— 兩句都會誤導：前半聽起來像權限沒給（於是白繞去重新整理、重新載入擴充功能），
   後半聽起來像目標分頁選錯（但目標明明是 Meet）。**真正的原因一直都是手勢來源。**
+- **`getMediaStreamId()` 拿到的 id 幾秒內沒用掉就失效。** 所以順序是
+  **先讓 offscreen 接住串流，再去啟動辨識伺服器**（`sttEnsure` 冷啟動載入 small
+  模型要好幾秒）。反過來的話 `getUserMedia` 拿到過期的 id，擷取靜靜失敗，
+  但狀態已經是「聆聽中」—— 講再多話都沒有逐字稿，**而且沒有任何錯誤訊息**。
+  這是最難查的一種：每一層看起來都正常。背景測試有一項守著這個順序。
+  順帶一提：`chrome.runtime.sendMessage` 沒人接時回 `undefined`，
+  把它當成成功就會變成另一種安靜失敗，所以 `!res` 也要算失敗。
 - **擷取音訊要對著 content script 回報的分頁**（`sender.tab.id`，存在背景的 `meetingTabId`，
   側邊欄用 `ma:meetingTab` 問）。側邊欄是獨立情境，`chrome.tabs.query({active:true})`
   拿到的不一定是會議分頁，猜錯時 tabCapture 永遠失敗，錯誤訊息又跟上面那個一模一樣。
