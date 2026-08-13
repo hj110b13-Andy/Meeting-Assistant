@@ -325,29 +325,17 @@ window.store = window.__module_store;
   // 那時伺服器已經被拉起來了，如果沒收掉就等於白佔約 400 MB。
   const realGetStreamId = window.chrome.tabCapture.getMediaStreamId;
 
-  // 先驗證「補救成功」這條路：第一次被拒 → executeScript 補授權 → 第二次成功。
-  // 這是最常見的情況，也是使用者不必手動點圖示的關鍵。
-  let firstCall = true;
-  window.__granted = false;
-  window.chrome.tabCapture.getMediaStreamId = async () => {
-    if (firstCall) { firstCall = false; throw new Error('Extension has not been invoked for the current page'); }
-    return 'stream-id';
-  };
-  const recovered = await send({ type: 'ma:audio:start', tabId: 1 });
-  check('被拒時會自動補授權再試一次，不必使用者點圖示',
-    recovered?.ok === true && window.__granted === true, JSON.stringify(recovered));
-  await send({ type: 'ma:audio:stop' });
-
-  // 補救也失敗時，才給出可行動的說明
-  window.__grantFails = true;
+  // Chrome 對 getMediaStreamId 的要求是**使用者手勢**，不是「擴充功能被叫用過」。
+  // 它給的錯誤訊息會把人帶往權限的方向（點圖示、重新整理、重新載入擴充功能），
+  // 但那些全都沒用 —— 曾經試過用 executeScript 自己補授權，同樣沒用。
+  // 所以錯誤訊息要直接講真正的解法：按側邊欄那顆按鈕。
   window.chrome.tabCapture.getMediaStreamId = async () => {
     throw new Error('Extension has not been invoked for the current page');
   };
   window.__native.posted.length = 0;
   const denied = await send({ type: 'ma:audio:start', tabId: 1 });
-  check('tabCapture 被拒時給出可行動的說明',
-    denied?.ok === false && denied.error.includes('重新整理會議分頁'), JSON.stringify(denied));
-  window.__grantFails = false;
+  check('tabCapture 被拒時指向「開始聆聽」按鈕，而不是權限設定',
+    denied?.ok === false && denied.error.includes('開始聆聽'), JSON.stringify(denied));
   check('tabCapture 被拒時會把已啟動的辨識伺服器收掉',
     window.__native.posted.some((m) => m.type === 'sttStop'),
     JSON.stringify(window.__native.posted.map((m) => m.type)));

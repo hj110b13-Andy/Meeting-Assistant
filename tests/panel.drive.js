@@ -115,15 +115,32 @@
   emit('status', { captionsFound: true, platform: 'google-meet', audioFallback: true });
   check('有字幕時說明它提供姓名', txt('#statusText').includes('姓名'), txt('#statusText'));
 
-  // 音訊優先：進到會議就該自動開始聽，**不等字幕**。
-  // 這是回歸測試 —— 舊版要等 45 秒確認「真的沒字幕」才啟動，
-  // 但實測 Meet 字幕斷斷續續，等它反而讓逐字稿一直是殘缺的。
+  // 擷取分頁音訊需要**使用者手勢**（chrome.tabCapture.getMediaStreamId 的硬性要求），
+  // 所以不能自動啟動 —— 計時器觸發的呼叫一定被 Chrome 拒絕。
+  // 這是回歸測試：曾經做成自動啟動，結果每次都失敗，而錯誤訊息
+  // （"Extension has not been invoked"）會把人帶往「權限沒給」的錯誤方向。
   window.__sent.length = 0;
   emit('status', { captionsFound: false, platform: 'google-meet', audioFallback: false });
   for (let i = 0; i < 10; i++) await tick();
-  check('進到會議就自動開始聽聲音，不等字幕',
-    window.__sent.some((m) => m.type === 'ma:audio:start'),
+  check('沒按按鈕時不會自作主張啟動擷取（沒有手勢一定失敗）',
+    !window.__sent.some((m) => m.type === 'ma:audio:start'),
     JSON.stringify(window.__sent.filter((m) => m.type === 'ma:audio:start')));
+  check('還沒開始時顯示「開始聆聽」按鈕',
+    !document.querySelector('#btnListen').classList.contains('hidden'));
+  check('狀態列告訴使用者要按那顆按鈕',
+    txt('#statusText').includes('開始聆聽'), txt('#statusText'));
+
+  // 按下去才會送出擷取請求
+  document.querySelector('#btnListen').click();
+  for (let i = 0; i < 10; i++) await tick();
+  check('按下「開始聆聽」才送出 ma:audio:start',
+    window.__sent.some((m) => m.type === 'ma:audio:start'),
+    JSON.stringify(window.__sent.map((m) => m.type)));
+
+  // 開始之後按鈕就收起來
+  emit('status', { captionsFound: false, platform: 'google-meet', audioFallback: true });
+  check('聆聽中時隱藏「開始聆聽」按鈕',
+    document.querySelector('#btnListen').classList.contains('hidden'));
 
   // ── 免費模式的 UI ─────────────────────────────────────────────
   check('顯示「免費模式」徽章', txt('#providerBadge') === '免費模式', txt('#providerBadge'));

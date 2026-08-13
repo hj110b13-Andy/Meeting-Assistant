@@ -160,6 +160,15 @@ service worker（背景）
 - **原生辨識另開一條 `connectNative`**，不跟 Claude Code 共用。`host.ps1` 是單執行緒循序
   處理訊息，共用的話「啟動辨識伺服器」會排在一個跑了 30 秒的 Claude Code 呼叫後面。
   附帶好處：連線關閉時 `host.ps1` 的 `finally` 會把伺服器一起收掉。
+- **「開始聆聽」不能改成自動執行。** `chrome.tabCapture.getMediaStreamId()` 要求
+  呼叫發生在**使用者手勢**的脈絡裡，計時器觸發的呼叫一定被拒。Chrome 給的錯誤是
+  `Extension has not been invoked for the current page` —— 這句話會把人帶往「權限沒給」
+  的方向，於是繞去點工具列圖示、重新整理分頁、重新載入擴充功能，**那些全都沒用**。
+  也試過在被拒時用 `chrome.scripting.executeScript` 自己補授權，同樣沒用：那不產生手勢。
+  唯一的解法是側邊欄那顆按鈕。看到有人想把它「自動化掉」時，這一段就是理由。
+- **擷取音訊要對著 content script 回報的分頁**（`sender.tab.id`，存在 `meetingTabId`）。
+  側邊欄是獨立情境，`chrome.tabs.query({active:true})` 拿到的不一定是會議分頁，
+  猜錯時 tabCapture 永遠失敗，而錯誤訊息跟「權限沒給」長得一模一樣。
 - **音訊不走 Native Messaging**（單則訊息上限 1 MB），是 offscreen 直接 HTTP POST 到
   `127.0.0.1:8317`。所以 `manifest.json` 需要那個 host permission，**埠號改了三個地方要一起改**
   （`manifest.json`、`whisper-native.js` 的 `STT_PORT`、`host.ps1` 的 `$STT_PORT`）。

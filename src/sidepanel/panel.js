@@ -153,11 +153,16 @@ function renderStatus() {
     // 有字幕的話姓名才抓得到，這點值得講，但不是必要條件
     msg += st.captionsFound ? ' · 字幕提供姓名' : '';
   } else {
-    msg = `${platformName} · 正在啟動聆聽…`;
+    msg = `${platformName} · 按「▶ 開始聆聽」開始記錄`;
   }
   if (summaryRunning) msg += ' · 產生摘要中';
   $('statusText').textContent = msg;
-  syncAutoStt();
+
+  // 已經在聽就把按鈕收起來（它只在「還沒開始」時有意義）。
+  // 換一場會議時 audioFallback 會變回 false，按鈕自動回來。
+  const listening = !!st.audioFallback;
+  $('btnListen').classList.toggle('hidden', listening);
+  if (!listening) resetListening();
 }
 
 function highlight(text, q) {
@@ -546,74 +551,67 @@ async function loadSettings() {
   settings = await chrome.runtime.sendMessage({ type: 'ma:settings:get' });
   if (!settings) return;
   $('askScreen').checked = !!settings.captureScreen;
-  syncAutoStt();
 }
 loadSettings();
 
-// 狀態訊息只在內容有變化時才會送過來（不會週期性重送），
-// 所以不能只靠它觸發 —— 自己定期複查。
-setInterval(() => { syncAutoStt(); }, 5000);
+/**
+ * 「開始聆聽」按鈕 —— 這顆按鈕存在的唯一理由是 **Chrome 要求使用者手勢**。
+ *
+ * `chrome.tabCapture.getMediaStreamId()` 不只要求「擴充功能被該分頁叫用過」，
+ * 它要求呼叫發生在使用者手勢的脈絡裡。計時器（setInterval）觸發的呼叫沒有手勢，
+ * **一定**會被拒絕，錯誤訊息是 "Extension has not been invoked for the current page"
+ * —— 訊息會讓人以為是權限沒給，於是往「點圖示、重新載入」的方向繞，但那些都沒用。
+ *
+ * 曾經試過在被拒時用 executeScript 自己補授權，那也沒用：executeScript
+ * 不會產生使用者手勢。唯一的解法就是讓使用者按一下。
+ */
+$('btnListen').addEventListener('click', () => startListening({ manual: true }));
 
 /**
- * 進到會議就開始聽分頁聲音，**不等字幕、也不因為字幕出現就停掉**。
+ * 開始聽分頁聲音。**這件事無法自動化，必須由使用者按一下。**
  *
- * 這裡的預設在實測後整個反過來了。原本是「字幕優先，沒字幕才聽聲音」，
- * 但真實會議裡 Meet 的字幕斷斷續續、常常抓不到（DOM 每幾個月改一次），
- * 而本機 whisper.cpp 反而穩定得多：離線實測整段「這季的目標／結帳失敗率／
- * 對帳／小陳」全部辨識正確。所以現在**音訊是主力，字幕只拿來校正說話者姓名**
- * （姓名只有平台字幕才有，whisper 拿不到）。
+ * `chrome.tabCapture.getMediaStreamId()` 要求呼叫發生在**使用者手勢**的脈絡裡。
+ * 計時器觸發的呼叫沒有手勢，一定被拒，而且 Chrome 給的錯誤是
+ * "Extension has not been invoked for the current page" —— 這句話會把人帶往
+ * 「權限沒給」的方向（點圖示、重新載入擴充功能、重新整理分頁），但那些全都沒用。
+ * 也試過在被拒時用 executeScript 自己補授權，同樣沒用：那不會產生手勢。
  *
- * 兩邊同時收不會產生重複：字幕的段落走 source='captions'，音訊走 source='audio'，
- * store 只把音訊那條寫進逐字稿，字幕那條僅用於姓名比對。
+ * 所以側邊欄有一顆「▶ 開始聆聽」。按下去之後：
+ *   - 音訊是逐字稿的唯一來源（字幕只拿來補說話者姓名）
+ *   - 不會因為字幕出現就停掉
+ *   - 換一場會議時會自動重來（見 renderStatus 裡的 audioFallback 判斷）
  *
- * 只會啟動本機引擎 —— 這個專案不存在會計費的辨識路線。
+ * 兩邊同時收不會產生重複：字幕走 source='captions'、音訊走 source='audio'，
+ * 背景只把音訊那條寫進逐字稿。
  */
-let sttStarting = false;      // 這一輪正在啟動，避免重複開擷取
-let sttRetryAt = 0;           // 失敗後要等到這個時間才重試
+let sttStarting = false;
 
-/**
- * 失敗後**要繼續重試**，不能一次失敗就永久放棄。
- *
- * 最常見的失敗是 tabCapture 要求「擴充功能已被該分頁叫用過」，也就是使用者
- * 還沒在會議分頁點過工具列圖示 —— 那是他隨時會去做的動作，一放棄就等於
- * 他點了也沒用，音訊整場都不會起來，逐字稿只剩斷斷續續的字幕。
- * （這個 bug 真的發生過：實測那場會議的逐字稿只有三段，其中一段還是
- * Meet 的「arrow_downward跳到底部」介面文字。）
- *
- * 用 15 秒退避而不是每 5 秒重試，避免權限沒給時洗版錯誤橫幅。
- */
-const STT_RETRY_MS = 15000;
-
-async function syncAutoStt() {
-  if (!settings?.sttAuto) return;
+async function startListening({ manual = false } = {}) {
   const st = state.status || {};
-
   if (st.audioFallback || sttStarting) return;
-  if (Date.now() < sttRetryAt) return;
 
-  // 要先真的在一場會議裡。audio-fallback 是備援自己的 platform 標記，不算。
   const inMeeting = !!st.platform && st.platform !== 'audio-fallback';
-  if (!inMeeting) return;
+  if (!inMeeting) {
+    if (manual) showBanner('還沒偵測到會議。請先開啟 Google Meet / Teams / Jitsi 的會議分頁。', 8000);
+    return;
+  }
 
   sttStarting = true;
   let started = false;
   try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab) { sttRetryAt = Date.now() + STT_RETRY_MS; return; }
-
-    const res = await chrome.runtime.sendMessage({ type: 'ma:audio:start', tabId: tab.id });
+    const res = await chrome.runtime.sendMessage({ type: 'ma:audio:start' });
     if (res?.ok) {
       started = true;
-      showBanner(`已開始聆聽會議聲音，逐字稿約 15 秒後開始出現。${sttStartedMessage(res)}`, 20000);
+      showBanner(`已開始聆聽，逐字稿約 15 秒後開始出現。${sttStartedMessage(res)}`, 15000);
       return;
     }
-
-    sttRetryAt = Date.now() + STT_RETRY_MS;
-    showBanner(res?.error || '無法聽取分頁聲音，15 秒後自動重試。', 12000);
+    showBanner(res?.error || '無法聽取分頁聲音。', 15000);
   } finally {
-    // 成功時**保持**擋住：狀態要等下一次 status 廣播才會變成 audioFallback=true，
-    // 在那之前的複查會再進來一次，於是開出第二個擷取。
-    // 失敗（或中途拋錯）才放開，否則永遠不會重試。
+    // 成功時保持擋住：狀態要等下一次 status 廣播才會變成 audioFallback=true，
+    // 在那之前重複呼叫會開出第二個擷取。
     if (!started) sttStarting = false;
   }
 }
+
+/** 換會議時要能重新開始聆聽 */
+function resetListening() { sttStarting = false; }

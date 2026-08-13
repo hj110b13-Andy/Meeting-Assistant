@@ -677,30 +677,16 @@ async function startAudioFallback(tabId, engineOverride) {
     streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
   } catch (err) {
     captureErr = err;
-    // Chrome 要求擴充功能「已被該分頁叫用過」才給音訊串流。
-    //
-    // 這個條件比想像中難滿足：側邊欄用 openPanelOnActionClick 開啟時，
-    // Chrome 直接開面板、**onClicked 不會觸發**，所以點了圖示也不算「叫用過」。
-    // 使用者會覺得「我明明點了啊」，然後音訊整場都起不來。
-    //
-    // 補救：對那個分頁跑一段什麼都不做的 executeScript。我們對三個會議網域
-    // 都有靜態 host permission，所以這件事本來就做得到，而它會讓擴充功能
-    // 正式「被該分頁叫用過」—— 等於自己把授權補上，不必麻煩使用者。
-    if (chrome.scripting?.executeScript) {
-      try {
-        await chrome.scripting.executeScript({ target: { tabId }, func: () => {} });
-        streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
-        captureErr = null;
-      } catch {
-        // 補救失敗就保留原本的錯誤 —— 那個訊息才是使用者需要看到的
-      }
-    }
   }
 
   if (!streamId) {
     const raw = String(captureErr?.message || captureErr || '未知錯誤');
-    const message = /not been invoked|activeTab/i.test(raw)
-      ? '無法擷取分頁音訊。請重新整理會議分頁（F5），若仍然不行，到 chrome://extensions 按這個擴充功能的「重新載入」再試。'
+    // Chrome 對這個 API 的要求是**使用者手勢**，不只是「擴充功能被叫用過」。
+    // 它給的錯誤訊息（"Extension has not been invoked for the current page"）
+    // 會讓人往權限的方向繞 —— 實測點圖示、重新整理分頁、重新載入擴充功能
+    // 全都沒用，因為那些都不產生手勢。所以這裡直接講真正的解法。
+    const message = /not been invoked|activeTab|gesture/i.test(raw)
+      ? '無法擷取分頁音訊：Chrome 要求由你按一下才能開始。請按側邊欄的「▶ 開始聆聽」。'
       : `無法擷取分頁音訊：${raw}`;
     // 上面可能已經把辨識伺服器拉起來了。這裡失敗就沒有東西會去停它，
     // 而 small 模型是常駐約 400 MB —— 這條路很容易走到（tabCapture 常因為
