@@ -29,6 +29,10 @@
 const TARGET_RATE = 16000;
 const OVERLAP_SEC = 2;
 const SILENCE_RMS = 0.004;     // 低於此值視為沒人講話，不送去辨識
+// 連續這麼多段都是靜音就回報。分頁被靜音、或擷取到沒聲音的分頁時，
+// 症狀是「聆聽中 · 0 段」而且完全沒有線索 —— 那種安靜的失敗最難查。
+const SILENT_RUNS_WARN = 3;
+let silentRuns = 0;
 const MAX_QUEUE = 1;           // 積壓超過這個就丟掉最舊的，寧可漏也不要越落後
 
 const CHUNK_SEC_BY_ENGINE = { 'whisper-native': 12, whisper: 20 };
@@ -201,8 +205,25 @@ function startChunker(src) {
     // 用完成時間排會讓兩邊的對話交錯錯亂。
     const startedAt = Date.now() - Math.round((merged.length / TARGET_RATE) * 1000);
 
-    // Whisper 對靜音會產生幻覺文字（「謝謝大家」之類），所以先擋掉
-    if (rms(merged) < SILENCE_RMS) return;
+    // Whisper 對靜音會產生幻覺文字（「謝謝大家」之類），所以先擋掉。
+    //
+    // 但「一直都是靜音」本身就是個症狀：tabCapture 接到了串流、狀態顯示
+    // 聆聽中，音量卻始終是 0 —— 實測發生過（分頁被靜音、或抓到沒有聲音的
+    // 分頁）。安靜地丟掉的話畫面上永遠是 0 段而且沒有任何線索，
+    // 所以連續丟掉一定數量後要明講。
+    const level = rms(merged);
+    if (level < SILENCE_RMS) {
+      silentRuns++;
+      if (silentRuns === SILENT_RUNS_WARN) {
+        notifyError(`聽了 ${Math.round(silentRuns * chunkSec)} 秒都沒有聲音（音量 ${level.toFixed(5)}）。`
+          + '請確認：會議分頁沒有被靜音（分頁上的喇叭圖示）、而且會議中真的有人在說話。');
+      }
+      return;
+    }
+    if (silentRuns >= SILENT_RUNS_WARN) {
+      notifyNote(`聽到聲音了（音量 ${level.toFixed(3)}），逐字稿即將出現。`);
+    }
+    silentRuns = 0;
     enqueue(merged, startedAt);
   };
 
@@ -292,7 +313,14 @@ async function startWhisperNative(streamId, options) {
   transcribe = nativeTranscribe;
   startChunker(src);
 
-  notifyNote(`本機原生辨識已就緒（${options.model || 'small'} 模型，完全離線）。每 ${chunkSec} 秒產出一段，所以其他人的發言會延遲約 ${chunkSec + 6} 秒。`);
+  // 把音軌狀態一起講出來。實測遇過「串流接住了但沒有音軌」與「音軌是靜音的」，
+  // 兩種的畫面都是「聆聽中 · 0 段」，沒有這行就完全看不出差別。
+  const tracks = mediaStream?.getAudioTracks?.() || [];
+  const trackInfo = tracks.length
+    ? `音軌 ${tracks.length} 條（${tracks.map((t) => (t.enabled ? '啟用' : '停用')).join('、')}）`
+    : '**沒有音軌** —— 這個分頁可能沒有在播放聲音';
+  notifyNote(`本機原生辨識已就緒（${options.model || 'small'} 模型，完全離線）。${trackInfo}。`
+    + `每 ${chunkSec} 秒產出一段，所以發言會延遲約 ${chunkSec + 6} 秒。`);
 }
 
 async function nativeTranscribe(audio) {
@@ -418,6 +446,7 @@ function stop() {
   recorder = null; socket = null; mediaStream = null; audioCtx = null;
   processor = null; worker = null; transcribe = null;
   pending = []; busy = false; buf = []; bufLen = 0; dropped = 0;
+  silentRuns = 0;
   carry = new Float32Array(0);
   lastResultText = '';
   liveBySpeaker.clear();
