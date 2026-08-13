@@ -650,3 +650,78 @@ async function startListening({ manual = false } = {}) {
 
 /** 換會議時要能重新開始聆聽 */
 function resetListening() { sttStarting = false; }
+
+// ── 我自己的發言 ────────────────────────────────────────────────
+/**
+ * 分頁擷取抓的是「分頁**播放出來**」的聲音 —— 也就是其他人的發言。
+ * **你自己講的話不會經過那裡**（Meet 不會把你的麥克風回放給你，否則會有回音），
+ * 所以逐字稿裡永遠不會有你自己。要記錄自己就得另外開麥克風。
+ *
+ * 用瀏覽器內建的 SpeechRecognition：免金鑰、免安裝，而且它本來就是為
+ * 「一支麥克風、一個人講話」設計的，在這個用途上比 whisper 更合適也更即時。
+ */
+let recog = null;
+
+function stopMic() {
+  if (!recog) return;
+  const r = recog;
+  recog = null;              // 先清掉，onend 才不會自動續接
+  try { r.stop(); } catch {}
+  $('btnMic').classList.remove('on');
+  showBanner('已停止記錄你自己的發言。', 6000);
+}
+
+function startMic() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) { showBanner('這個瀏覽器不支援內建語音辨識，無法記錄你自己的發言。', 10000); return; }
+  if (recog) return;
+
+  recog = new SR();
+  recog.lang = 'zh-TW';
+  recog.continuous = true;
+  recog.interimResults = true;
+  const micSession = `mic-${Date.now().toString(36)}`;
+
+  recog.onresult = (e) => {
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const r = e.results[i];
+      const text = r[0].transcript.trim();
+      if (!text) continue;
+      chrome.runtime.sendMessage({
+        type: 'ma:segment',
+        payload: {
+          id: `${micSession}-${i}`, speaker: '我', text,
+          final: r.isFinal, ts: Date.now(), startedAt: Date.now(),
+          // source 'audio' 才會進逐字稿（'captions' 只用來補姓名）
+          source: 'audio',
+          platform: state.status?.platform || 'mic',
+          sessionId: state.meeting?.sessionId || micSession,
+          title: state.meeting?.title || '會議',
+        },
+      });
+    }
+  };
+
+  recog.onerror = (e) => {
+    if (e.error === 'not-allowed') {
+      stopMic();
+      showBanner('麥克風權限被拒。請在網址列左側的鎖頭圖示裡允許此擴充功能使用麥克風。', 15000);
+    } else if (e.error !== 'no-speech') {
+      showBanner(`麥克風辨識錯誤：${e.error}`, 10000);
+    }
+  };
+  // 長時間會自動斷線，自動續接
+  recog.onend = () => { if (recog) { try { recog.start(); } catch {} } };
+
+  try {
+    recog.start();
+  } catch (err) {
+    recog = null;
+    showBanner(`無法啟動麥克風：${String(err?.message || err)}`, 10000);
+    return;
+  }
+  $('btnMic').classList.add('on');
+  showBanner('已開始記錄你自己的發言（其他人的發言仍由分頁擷取負責）。', 10000);
+}
+
+$('btnMic').addEventListener('click', () => (recog ? stopMic() : startMic()));

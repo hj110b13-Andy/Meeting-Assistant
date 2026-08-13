@@ -169,9 +169,13 @@
     JSON.stringify(localMsgs.filter((m) => m.type === 'ma:local:done')));
 
   // 介面刻意精簡：這些按鈕已經移除，因為它們代表的動作現在都自動發生
-  for (const id of ['btnSummary', 'btnAudio', 'btnMic', 'btnSnapshot']) {
+  for (const id of ['btnSummary', 'btnAudio', 'btnSnapshot']) {
     check(`#${id} 已移除（動作改成自動）`, !document.querySelector(`#${id}`));
   }
+  // 但「我的發言」必須留著：分頁擷取抓的是分頁播放出來的聲音，
+  // 你自己講的話不會經過那裡，只能靠麥克風。
+  check('保留「我的發言」按鈕（分頁擷取聽不到自己）',
+    !!document.querySelector('#btnMic'));
 
   const failed = results.filter((x) => x.startsWith('FAIL')).length;
   const pre = document.createElement('pre');

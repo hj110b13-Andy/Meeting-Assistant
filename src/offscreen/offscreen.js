@@ -28,15 +28,28 @@
 
 const TARGET_RATE = 16000;
 const OVERLAP_SEC = 2;
-const SILENCE_RMS = 0.004;     // 低於此值視為沒人講話，不送去辨識
-// 連續這麼多段都是靜音就回報。分頁被靜音、或擷取到沒聲音的分頁時，
+const SILENCE_RMS = 0.004;     // 低於此值視為沒人講話
+
+// ── VAD 切段參數 ───────────────────────────────────────────────
+// 靜音多久算「這句講完了」。太短會把句中的換氣當成句尾（切成碎片），
+// 太長則每段都要等很久才送出。0.7 秒是一般中文口語停頓的下限。
+const CUT_SILENCE_MS = 700;
+// 講不停時的上限。whisper 的窗是 30 秒，超過要多跑一輪 encoder。
+const MAX_CHUNK_SEC = 24;
+// 比這短的片段不送（咳嗽、單一個「嗯」只會得到幻覺文字）
+const MIN_CHUNK_SEC = 1.0;
+
+// 完全收不到聲音時要講出來。分頁被靜音、或只有自己在會議裡的時候，
 // 症狀是「聆聽中 · 0 段」而且完全沒有線索 —— 那種安靜的失敗最難查。
-const SILENT_RUNS_WARN = 3;
-let silentRuns = 0;
+const SILENT_WARN_MS = 30000;
+let silentMs = 0;
+let quietMs = 0;
+let silentWarned = false;
 const MAX_QUEUE = 1;           // 積壓超過這個就丟掉最舊的，寧可漏也不要越落後
 
+// WASM 備援那條仍然用固定間隔切段（它跑在 Worker 裡，改動風險不值得），
+// 原生那條已改成 VAD 切段，不再用這個表。
 const CHUNK_SEC_BY_ENGINE = { 'whisper-native': 12, whisper: 20 };
-const MAX_CHUNK_SEC = 30;      // 再長就超過 whisper 的 30 秒窗，得多跑一輪編碼器
 
 let mediaStream = null;
 let recorder = null;
@@ -140,11 +153,32 @@ function stripOverlap(prev, next) {
 }
 
 /**
- * whisper 對靜音或音樂會吐出括號標記（[BLANK_AUDIO]、(音樂)、【掌聲】）。
- * 伺服器端已經開了 -sns 抑制大部分，這裡是最後一道：整句都在括號裡就丟掉。
+ * whisper 的幻覺文字，不是真的有人講的話。
+ *
+ * 兩類：
+ *   1. 括號標記（[BLANK_AUDIO]、(音樂)、【掌聲】）—— 伺服器端的 -sns
+ *      已經抑制大部分，這裡是最後一道。
+ *   2. **訓練資料裡的字幕組署名。** whisper 的中文訓練資料含大量帶字幕的
+ *      影片，所以聽到近似靜音或無意義的聲音時，很容易吐出「字幕by索蘭婭」、
+ *      「請不吝點贊訂閱」這類句子。實測的逐字稿裡真的出現過 ——
+ *      這些混進去會一路汙染摘要與回答建議。
  */
+const HALLUCINATIONS = [
+  /字幕\s*by/i,
+  /字幕志願者/,
+  /请不吝|請不吝/,
+  /点赞|點贊|訂閱|订阅/,
+  /明鏡與點點欄目|明镜与点点栏目/,
+  /^(謝謝(大家|觀看|收看)|谢谢(大家|观看|收看))[。.!！]?$/,
+  /^(下集再見|下集再见|再見|再见)[。.!！]?$/,
+  /^(MUQ|muq)$/,
+];
+
 function isNoiseOnly(text) {
-  return /^[\s]*[[(（【][^\])）】]*[\])）】][\s]*$/.test(text);
+  const t = String(text || '').trim();
+  if (!t) return true;
+  if (/^[\s]*[[(（【][^\])）】]*[\])）】][\s]*$/.test(t)) return true;
+  return HALLUCINATIONS.some((re) => re.test(t));
 }
 
 /** Float32 → 16-bit PCM WAV。whisper-server 收的是檔案，不是原始樣本。 */
@@ -178,10 +212,38 @@ function toWavBlob(samples, rate = TARGET_RATE) {
 }
 
 /**
- * 接上音訊圖，每 chunkSec 秒切一段丟進佇列。
+ * 把累積的音訊送去辨識。**只在「講完一句」或「講太久」時呼叫。**
  *
- * chunkSec 每次切段時重讀，所以 noteDrop 拉長段落後會立刻生效。
+ * 舊版是每 12 秒硬切一次，不管當下有沒有人在講話。實測的逐字稿長這樣：
+ *
+ *   [22:46:28] 你
+ *   [22:46:39] 麥克風
+ *   [22:46:52] 剛剛好嗎
+ *
+ * 每 12 秒才兩三個字 —— 因為句子被從中間切開，whisper 拿到的是半句話，
+ * 前後文都沒了，辨識自然又短又錯。改成在靜音處切之後，一段就是一句話。
  */
+function flushChunk() {
+  if (!bufLen) return;
+
+  const merged = new Float32Array(carry.length + bufLen);
+  merged.set(carry, 0);
+  let at = carry.length;
+  for (const b of buf) { merged.set(b, at); at += b.length; }
+  buf = []; bufLen = 0; quietMs = 0;
+  // 留一點尾巴當下一段的前文，接在句子邊界時幫助不大但無害
+  carry = merged.slice(Math.max(0, merged.length - OVERLAP_SEC * TARGET_RATE));
+
+  // 太短的片段（咳嗽、一聲「嗯」）送去辨識只會得到幻覺文字
+  if (merged.length < MIN_CHUNK_SEC * TARGET_RATE) return;
+
+  // 這段音訊實際「被說出來」的時間，不是辨識完成的時間。
+  // 逐字稿要照說話時間排序，用完成時間排會讓對話順序錯亂。
+  const startedAt = Date.now() - Math.round((merged.length / TARGET_RATE) * 1000);
+  enqueue(merged, startedAt);
+}
+
+/** 接上音訊圖。切段由 VAD 決定（見 flushChunk），不是固定間隔。 */
 function startChunker(src) {
   // ScriptProcessorNode 雖然已棄用，但這裡只做「複製 + 降取樣」，
   // 推論在 Worker 或另一個程序裡，主執行緒不會被卡住，實務上夠穩。
@@ -204,42 +266,39 @@ function startChunker(src) {
       mono = ch0;
     }
     const down = downsample(mono, audioCtx.sampleRate);
-    buf.push(down);
-    bufLen += down.length;
-    if (bufLen < chunkSec * TARGET_RATE) return;
+    const level = rms(down);
 
-    const merged = new Float32Array(carry.length + bufLen);
-    merged.set(carry, 0);
-    let at = carry.length;
-    for (const b of buf) { merged.set(b, at); at += b.length; }
-    buf = []; bufLen = 0;
-    carry = merged.slice(Math.max(0, merged.length - OVERLAP_SEC * TARGET_RATE));
-
-    // 這段音訊實際「被說出來」的時間，不是辨識完成的時間。
-    // 逐字稿要照說話時間排序 —— 辨識要十幾秒，麥克風是即時的，
-    // 用完成時間排會讓兩邊的對話交錯錯亂。
-    const startedAt = Date.now() - Math.round((merged.length / TARGET_RATE) * 1000);
-
-    // Whisper 對靜音會產生幻覺文字（「謝謝大家」之類），所以先擋掉。
-    //
-    // 但「一直都是靜音」本身就是個症狀：tabCapture 接到了串流、狀態顯示
-    // 聆聽中，音量卻始終是 0 —— 實測發生過（分頁被靜音、或抓到沒有聲音的
-    // 分頁）。安靜地丟掉的話畫面上永遠是 0 段而且沒有任何線索，
-    // 所以連續丟掉一定數量後要明講。
-    const level = rms(merged);
+    // ── 靜音偵測：沒人講話時不要累積，也不要送去辨識 ──────────
     if (level < SILENCE_RMS) {
-      silentRuns++;
-      if (silentRuns === SILENT_RUNS_WARN) {
-        notifyError(`聽了 ${Math.round(silentRuns * chunkSec)} 秒都沒有聲音（音量 ${level.toFixed(5)}）。`
-          + '請確認：會議分頁沒有被靜音（分頁上的喇叭圖示）、而且會議中真的有人在說話。');
+      quietMs += (down.length / TARGET_RATE) * 1000;
+      // 完全沒收到過聲音時要講出來，否則畫面永遠是 0 段又沒有線索
+      if (!bufLen) {
+        silentMs += (down.length / TARGET_RATE) * 1000;
+        if (silentMs >= SILENT_WARN_MS && !silentWarned) {
+          silentWarned = true;
+          notifyError(`聽了 ${Math.round(silentMs / 1000)} 秒都沒有聲音（音量 ${level.toFixed(5)}）。`
+            + '請確認：會議分頁沒有被靜音（分頁上的喇叭圖示）、而且會議中真的有人在說話。'
+            + '注意 tabCapture 抓的是分頁「播放出來」的聲音，你自己的麥克風不會經過這裡。');
+        }
+        return;
       }
+      // 講完一句了（靜音夠久）→ 現在切，句子才不會被腰斬
+      if (quietMs >= CUT_SILENCE_MS) flushChunk();
       return;
     }
-    if (silentRuns >= SILENT_RUNS_WARN) {
+
+    // 有聲音
+    if (silentWarned) {
       notifyNote(`聽到聲音了（音量 ${level.toFixed(3)}），逐字稿即將出現。`);
+      silentWarned = false;
     }
-    silentRuns = 0;
-    enqueue(merged, startedAt);
+    silentMs = 0;
+    quietMs = 0;
+    buf.push(down);
+    bufLen += down.length;
+
+    // 一直講不停的話還是要切，否則會超過 whisper 的 30 秒窗
+    if (bufLen >= MAX_CHUNK_SEC * TARGET_RATE) flushChunk();
   };
 
   // 必須接上 destination，ScriptProcessorNode 才會被排程執行。
@@ -258,16 +317,11 @@ function startChunker(src) {
  * 每次略過都跳橫幅會把畫面洗掉，而且落後通常是連續發生的，所以只在
  * 第一次與之後每 5 段回報一次。
  *
- * 連續落後三次就把段落拉長 4 秒：每次呼叫有固定成本，段落越長 RTF 越低，
- * 所以「跟不上」的正確反應是加長而不是縮短。上限 30 秒 ——
- * 再長就超過 whisper 的 30 秒窗，得多跑一輪編碼器，反而更慢。
+ * 改成 VAD 切段之後，段落長度由「講多久」決定，不再是可調的參數 ——
+ * 所以這裡只回報，不再自動拉長（拉長會把兩句話黏成一段，反而更難讀）。
  */
 function noteDrop() {
   dropped += 1;
-  if (dropped % 3 === 0 && chunkSec < MAX_CHUNK_SEC) {
-    chunkSec = Math.min(MAX_CHUNK_SEC, chunkSec + 4);
-    notifyNote(`辨識跟不上，已把分段從 ${chunkSec - 4} 秒拉長到 ${chunkSec} 秒（段落越長每秒成本越低）。發言會延遲得久一些，但不會再一直漏。`);
-  }
   if (dropped === 1 || dropped % 5 === 0) {
     notifyError(`本機辨識跟不上，已略過 ${dropped} 段。開會時 CPU 被視訊佔用會發生這種情況。`);
   }
@@ -335,7 +389,7 @@ async function startWhisperNative(streamId, options) {
     ? `音軌 ${tracks.length} 條（${tracks.map((t) => (t.enabled ? '啟用' : '停用')).join('、')}）`
     : '**沒有音軌** —— 這個分頁可能沒有在播放聲音';
   notifyNote(`本機原生辨識已就緒（${options.model || 'small'} 模型，完全離線）。${trackInfo}。`
-    + `每 ${chunkSec} 秒產出一段，所以發言會延遲約 ${chunkSec + 6} 秒。`);
+    + '每講完一句話（停頓約 0.7 秒）就辨識一次，所以逐字稿會在對方講完後幾秒出現。');
 }
 
 async function nativeTranscribe(audio) {
@@ -461,7 +515,7 @@ function stop() {
   recorder = null; socket = null; mediaStream = null; audioCtx = null;
   processor = null; worker = null; transcribe = null;
   pending = []; busy = false; buf = []; bufLen = 0; dropped = 0;
-  silentRuns = 0;
+  silentMs = 0; quietMs = 0; silentWarned = false;
   carry = new Float32Array(0);
   lastResultText = '';
   liveBySpeaker.clear();

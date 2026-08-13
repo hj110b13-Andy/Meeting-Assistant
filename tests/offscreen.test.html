@@ -73,6 +73,16 @@ check('【掌聲】被視為雜訊', isNoiseOnly('  【掌聲】 '));
 check('句中有括號的正常句子不算雜訊', isNoiseOnly('失敗率（不含退款）是三成') === false);
 check('正常句子不算雜訊', isNoiseOnly('那我們下週再看') === false);
 
+// whisper 的中文訓練資料含大量帶字幕的影片，聽到近似靜音時會吐出字幕組
+// 署名。實測的逐字稿裡真的出現過「字幕by索蘭婭」。
+check('字幕組署名被視為幻覺', isNoiseOnly('字幕by索蘭婭'));
+check('簡體的字幕署名也擋掉', isNoiseOnly('字幕by索兰娅'));
+check('「請不吝點贊訂閱」被視為幻覺', isNoiseOnly('请不吝点赞订阅转发打赏'));
+check('單獨的「謝謝大家」被視為幻覺', isNoiseOnly('謝謝大家'));
+check('CP950 壞掉時的 MUQ 被視為幻覺', isNoiseOnly('MUQ'));
+// 但正常語境裡出現「謝謝」不該被擋
+check('句子裡的謝謝不算幻覺', isNoiseOnly('謝謝大家今天的討論，那就先這樣') === false);
+
 // ── toWavBlob：whisper-server 收的是 WAV 檔，不是原始樣本 ────────
 const wav = toWavBlob(new Float32Array([0, 0.5, -0.5, 1, -1]), 16000);
 const bytes = new DataView(await wav.arrayBuffer());
@@ -124,10 +134,10 @@ transcribe = null;
 for (let i = 0; i < 4; i++) enqueue(new Float32Array(10), 1000 + i);
 check('積壓時只留最新的一段', pending.length === 1, `佇列 ${pending.length} 段`);
 check('丟掉的段數有記錄', dropped === 3, String(dropped));
-check('連續落後三次就把分段拉長 4 秒', chunkSec === 16, String(chunkSec));
-check('拉長分段時有明確告知使用者',
-  sent.some((m) => m.type === 'ma:audioNote' && m.message.includes('16 秒')),
-  JSON.stringify(sent.filter((m) => m.type === 'ma:audioNote').map((m) => m.message)));
+// 改成 VAD 切段之後不再自動拉長分段：段落長度由「講多久」決定，
+// 硬拉長只會把兩句話黏成一段，反而更難讀。落後仍然要回報（見下一項）。
+check('不再自動拉長分段（VAD 切段下段落長度由句子決定）',
+  chunkSec === 12, String(chunkSec));
 check('第一次落後就回報錯誤橫幅',
   sent.filter((m) => m.type === 'ma:audioError').length === 1,
   `${sent.filter((m) => m.type === 'ma:audioError').length} 次`);
