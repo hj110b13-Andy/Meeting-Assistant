@@ -188,7 +188,10 @@ function renderTranscript() {
   if (!rows.length) {
     const p = document.createElement('p');
     p.className = 'empty';
-    p.textContent = q ? '沒有符合的段落。' : '等待字幕…請確認會議中已開啟字幕（Meet：CC 按鈕；Teams：更多 → 語言和語音 → 開啟即時字幕）。';
+    // 不要再叫使用者去開字幕 —— 逐字稿來自本機辨識，字幕只是拿來補姓名。
+    p.textContent = q
+      ? '沒有符合的段落。'
+      : '等待發言…開始說話後約 15 秒會出現逐字稿（本機辨識需要時間）。想讓說話者顯示真名的話，可以在會議裡開啟字幕。';
     box.appendChild(p);
   }
 

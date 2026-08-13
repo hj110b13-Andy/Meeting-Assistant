@@ -10,6 +10,15 @@ import { sttEnsure, sttStatus, sttShutdown, STT_ENDPOINT } from './whisper-nativ
 
 const ports = new Set();
 
+// 會議分頁的 id，由 content script 的 ma:status 訊息填入（見下方）。
+// tabCapture 要對著這個分頁要音訊，不能靠側邊欄猜。
+let meetingTabId = null;
+
+// 分頁關掉就忘掉它，否則下一場會議會對著已經不存在的分頁要音訊
+chrome.tabs?.onRemoved?.addListener((tabId) => {
+  if (tabId === meetingTabId) meetingTabId = null;
+});
+
 chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
 });
@@ -101,6 +110,11 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
         return reply?.({ ok: true });
 
       case 'ma:status': {
+        // 記住會議分頁的 id。側邊欄自己查不到可靠的答案 ——
+        // 它是獨立的情境，chrome.tabs.query({active:true}) 可能給到別的分頁，
+        // 於是 tabCapture 對著錯的分頁要音訊，永遠失敗。
+        // 這則訊息是從會議分頁的 content script 送來的，sender.tab.id 才是對的。
+        if (sender?.tab?.id) meetingTabId = sender.tab.id;
         const changed = store.startMeetingIfNeeded(msg.payload);
         store.setStatus({
           captionsFound: msg.payload.captionsFound,
@@ -614,7 +628,7 @@ async function snapshotForClaudeCode() {
   return { ok: true, saved, dir };
 }
 
-// ── 音訊備援（字幕抓不到時） ────────────────────────────────────
+// ── 聽會議聲音（逐字稿的來源） ──────────────────────────────────
 async function ensureOffscreen() {
   const existing = await chrome.offscreen.hasDocument?.();
   if (existing) return;
@@ -627,6 +641,17 @@ async function ensureOffscreen() {
 
 async function startAudioFallback(tabId, engineOverride) {
   const settings = await getSettings();
+
+  // 以 content script 回報的會議分頁為準。側邊欄傳來的是它用
+  // chrome.tabs.query({active:true}) 猜的，而側邊欄是獨立情境 ——
+  // 猜錯時 tabCapture 會對著錯的分頁要音訊，永遠拿不到（症狀就是
+  // 「無法擷取分頁音訊」一直重試，但你人明明就在會議裡）。
+  tabId = meetingTabId || tabId;
+  if (!tabId) {
+    const message = '找不到會議分頁。請先開啟 Google Meet / Teams / Jitsi 的會議分頁。';
+    reportError(new Error(message));
+    return { ok: false, error: message };
+  }
 
   // 只有本機引擎。雲端那條（Deepgram）會按量計費，已整個移除 ——
   // 使用者的要求是只花 Claude Pro 訂閱的錢，留著就有誤觸的可能。
@@ -675,7 +700,7 @@ async function startAudioFallback(tabId, engineOverride) {
   if (!streamId) {
     const raw = String(captureErr?.message || captureErr || '未知錯誤');
     const message = /not been invoked|activeTab/i.test(raw)
-      ? '無法擷取分頁音訊：請在「會議分頁」點一次工具列的擴充功能圖示，再重新整理該分頁。'
+      ? '無法擷取分頁音訊。請重新整理會議分頁（F5），若仍然不行，到 chrome://extensions 按這個擴充功能的「重新載入」再試。'
       : `無法擷取分頁音訊：${raw}`;
     // 上面可能已經把辨識伺服器拉起來了。這裡失敗就沒有東西會去停它，
     // 而 small 模型是常駐約 400 MB —— 這條路很容易走到（tabCapture 常因為

@@ -258,6 +258,26 @@ window.store = window.__module_store;
   check('匯出 Markdown 含逐字稿', exported?.markdown?.includes('我們先看金流的部分'));
   check('匯出 Markdown 含待辦', exported?.markdown?.includes('追 API'));
 
+  // ── 擷取音訊要對著「會議分頁」，不是側邊欄猜的那個 ────────────
+  // 側邊欄是獨立情境，chrome.tabs.query({active:true}) 可能給到別的分頁；
+  // content script 送 ma:status 時的 sender.tab.id 才是可靠的來源。
+  const capturedTabs = [];
+  const realGetId = window.chrome.tabCapture.getMediaStreamId;
+  window.chrome.tabCapture.getMediaStreamId = async ({ targetTabId }) => {
+    capturedTabs.push(targetTabId);
+    return 'stream-id';
+  };
+  // 模擬 content script 從第 77 號分頁回報狀態
+  await new Promise((resolve) => onMessageHandler(
+    { type: 'ma:status', payload: { platform: 'google-meet', captionsFound: true, sessionId: 'sess1', title: '週會', url: 'https://meet.google.com/x' } },
+    { tab: { id: 77 } }, resolve));
+  // 側邊欄猜錯，傳了 999
+  await send({ type: 'ma:audio:start', tabId: 999 });
+  check('擷取音訊對著 content script 回報的會議分頁，不是側邊欄猜的',
+    capturedTabs.at(-1) === 77, `實際對著分頁 ${capturedTabs.at(-1)}`);
+  await send({ type: 'ma:audio:stop' });
+  window.chrome.tabCapture.getMediaStreamId = realGetId;
+
   // ── 聽會議聲音：沒金鑰時要走本機引擎，而不是拒絕 ──────────────
   window.__sentToRuntime.length = 0;
   const audio = await send({ type: 'ma:audio:start', tabId: 1 });
@@ -326,7 +346,7 @@ window.store = window.__module_store;
   window.__native.posted.length = 0;
   const denied = await send({ type: 'ma:audio:start', tabId: 1 });
   check('tabCapture 被拒時給出可行動的說明',
-    denied?.ok === false && denied.error.includes('點一次工具列的擴充功能圖示'), JSON.stringify(denied));
+    denied?.ok === false && denied.error.includes('重新整理會議分頁'), JSON.stringify(denied));
   window.__grantFails = false;
   check('tabCapture 被拒時會把已啟動的辨識伺服器收掉',
     window.__native.posted.some((m) => m.type === 'sttStop'),
