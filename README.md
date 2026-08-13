@@ -218,20 +218,20 @@ powershell -ExecutionPolicy Bypass -File bridge\install.ps1 -ExtensionId <剛抄
 
 ### 在另一台電腦上改這個專案
 
-改完要推回來的話，流程是：
-
 ```powershell
-# 改之前先確認基準是綠的
+git pull --rebase        # ① 開工前先把另一台的變更接下來
+
+# ② 確認基準是綠的（別在壞掉的基礎上改）
 powershell -ExecutionPolicy Bypass -File tests\run.ps1
 powershell -ExecutionPolicy Bypass -File tests\check-project.ps1
 
 # ……改程式……
 
-# 改完兩個都要再跑一次，全綠才推
+# ③ 改完兩個都要再跑一次，全綠才推
 powershell -ExecutionPolicy Bypass -File tests\run.ps1
 powershell -ExecutionPolicy Bypass -File tests\check-project.ps1
 
-git pull --rebase        # 先把另一台的變更接下來，避免分叉
+git pull --rebase        # ④ 再拉一次，萬一這期間另一台又推了
 git add -A
 git commit -m "說明改了什麼、以及為什麼"
 git push
@@ -240,6 +240,61 @@ git push
 `check-project.ps1` 特別重要：它抓的是**測試跑得過、但擴充功能根本載不進去**的那類問題（少了 UTF-8 BOM、`.bat` 變成 LF、底線開頭的檔名、埠號對不上）。這些在 Windows 上很容易不小心引入，而症狀都不會指向真正的原因。
 
 專案的慣例與地雷寫在 **[`CLAUDE.md`](CLAUDE.md)** —— Claude Code 會自動讀那個檔案，所以在任何一台電腦上開始工作前不必特別交代。
+
+#### 為什麼要 `git pull --rebase`
+
+兩台電腦輪流改同一個 repo 時，遲早會遇到 push 被拒絕：
+
+```
+! [rejected]  main -> main (fetch first)
+```
+
+意思是**遠端有你手上沒有的 commit**。push 只做「快轉」，硬推等於把那個 commit 從歷史上抹掉，所以 git 一律擋下來要你先看過。這是保護機制，不是錯誤。
+
+```
+兩台都從 c848b9d 開始
+
+A 電腦：改 panel.js  → 推成功    遠端變成 c848b9d → A1
+B 電腦：改 store.js  → 想推      但 B 手上還停在 c848b9d
+                                 ✗ rejected（B 沒有 A1）
+```
+
+`git pull --rebase` 把遠端的 commit 拿下來，再把**你的** commit 重新接到最新的後面：
+
+```
+之前：  c848b9d ──> A1        （遠端）
+        c848b9d ──> B1        （你手上）
+
+之後：  c848b9d ──> A1 ──> B1'
+                          ↑ 內容一樣，只是基準點換了
+```
+
+變成一條直線就能推了。
+
+不加 `--rebase` 的 `git pull` 是「合併」，也能解決，但會多一個合併 commit、歷史有分岔。**日常兩台同步建議用 `--rebase`**，歷史比較好讀。（本專案第一次推送時用的是合併，因為那時本地與 GitHub 自動產生的 initial commit 完全沒有共同祖先，rebase 反而彆扭。）
+
+#### 如果兩台改到同一行
+
+rebase 會停下來，衝突的檔案裡會出現：
+
+```
+<<<<<<< HEAD
+（另一台的版本）
+=======
+（你的版本）
+>>>>>>>
+```
+
+把檔案編輯成你要的樣子（連那三行標記一起刪掉），然後：
+
+```powershell
+git add <那個檔案>
+git rebase --continue
+```
+
+想整個放棄回到原狀：`git rebase --abort`。
+
+只有**兩邊動到同一個檔案的同一段**才會衝突。一台改 `panel.js`、一台改 `store.js` 是不會撞的。
 
 ## 使用
 
