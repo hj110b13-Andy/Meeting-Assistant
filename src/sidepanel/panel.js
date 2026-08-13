@@ -599,7 +599,33 @@ async function startListening({ manual = false } = {}) {
   sttStarting = true;
   let started = false;
   try {
-    const res = await chrome.runtime.sendMessage({ type: 'ma:audio:start' });
+    // **getMediaStreamId 必須在這裡呼叫，不能交給背景。**
+    //
+    // 使用者手勢**不會跨 sendMessage 傳到 service worker**。之前是按鈕送訊息、
+    // 背景去呼叫，結果背景那邊沒有手勢，Chrome 照樣拒絕 —— 症狀是「按了沒反應」，
+    // 而錯誤訊息還是那句會誤導人的 "Extension has not been invoked"。
+    // 側邊欄是點擊實際發生的地方，只有在這裡呼叫才帶得到手勢。
+    //
+    // 先問背景哪個分頁是會議分頁（content script 回報的 sender.tab.id 才可靠，
+    // 側邊欄自己用 tabs.query({active:true}) 會拿到錯的）。
+    const info = await chrome.runtime.sendMessage({ type: 'ma:meetingTab' });
+    if (!info?.tabId) {
+      showBanner('找不到會議分頁。請確認 Meet / Teams / Jitsi 分頁還開著，並重新整理一次。', 12000);
+      return;
+    }
+
+    let streamId;
+    try {
+      streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: info.tabId });
+    } catch (err) {
+      const raw = String(err?.message || err);
+      showBanner(/invoked|gesture|activeTab/i.test(raw)
+        ? `無法擷取分頁音訊（${raw}）。請重新整理會議分頁後，再按一次「▶ 開始聆聽」。`
+        : `無法擷取分頁音訊：${raw}`, 15000);
+      return;
+    }
+
+    const res = await chrome.runtime.sendMessage({ type: 'ma:audio:start', streamId });
     if (res?.ok) {
       started = true;
       showBanner(`已開始聆聽，逐字稿約 15 秒後開始出現。${sttStartedMessage(res)}`, 15000);

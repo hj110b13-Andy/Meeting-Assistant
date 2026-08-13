@@ -258,29 +258,20 @@ window.store = window.__module_store;
   check('匯出 Markdown 含逐字稿', exported?.markdown?.includes('我們先看金流的部分'));
   check('匯出 Markdown 含待辦', exported?.markdown?.includes('追 API'));
 
-  // ── 擷取音訊要對著「會議分頁」，不是側邊欄猜的那個 ────────────
+  // ── 會議分頁的 id 由 content script 回報，側邊欄要問得到 ────────
   // 側邊欄是獨立情境，chrome.tabs.query({active:true}) 可能給到別的分頁；
-  // content script 送 ma:status 時的 sender.tab.id 才是可靠的來源。
-  const capturedTabs = [];
-  const realGetId = window.chrome.tabCapture.getMediaStreamId;
-  window.chrome.tabCapture.getMediaStreamId = async ({ targetTabId }) => {
-    capturedTabs.push(targetTabId);
-    return 'stream-id';
-  };
-  // 模擬 content script 從第 77 號分頁回報狀態
+  // ma:status 的 sender.tab.id 才是可靠的來源。
   await new Promise((resolve) => onMessageHandler(
     { type: 'ma:status', payload: { platform: 'google-meet', captionsFound: true, sessionId: 'sess1', title: '週會', url: 'https://meet.google.com/x' } },
     { tab: { id: 77 } }, resolve));
-  // 側邊欄猜錯，傳了 999
-  await send({ type: 'ma:audio:start', tabId: 999 });
-  check('擷取音訊對著 content script 回報的會議分頁，不是側邊欄猜的',
-    capturedTabs.at(-1) === 77, `實際對著分頁 ${capturedTabs.at(-1)}`);
-  await send({ type: 'ma:audio:stop' });
-  window.chrome.tabCapture.getMediaStreamId = realGetId;
+  const tabInfo = await send({ type: 'ma:meetingTab' });
+  check('側邊欄問得到 content script 回報的會議分頁 id',
+    tabInfo?.tabId === 77, JSON.stringify(tabInfo));
 
   // ── 聽會議聲音：沒金鑰時要走本機引擎，而不是拒絕 ──────────────
+  // streamId 由側邊欄取得後傳進來（使用者手勢不跨 sendMessage 傳到背景）
   window.__sentToRuntime.length = 0;
-  const audio = await send({ type: 'ma:audio:start', tabId: 1 });
+  const audio = await send({ type: 'ma:audio:start', streamId: 'stream-id' });
   check('沒有金鑰時仍可用（自動走原生本機辨識）',
     audio?.ok === true && audio.engine === 'whisper-native', JSON.stringify(audio));
 
@@ -308,7 +299,7 @@ window.store = window.__module_store;
   window.__native.failStt = true;
   window.__sentToRuntime.length = 0;
   const notesBefore = got('audioNote').length;
-  const fallback = await send({ type: 'ma:audio:start', tabId: 1 });
+  const fallback = await send({ type: 'ma:audio:start', streamId: 'stream-id' });
   check('原生辨識起不來時自動退到瀏覽器內建引擎',
     fallback?.ok === true && fallback.engine === 'whisper', JSON.stringify(fallback));
   const fbStart = window.__sentToRuntime.find((m) => m.type === 'ma:offscreen:start');
@@ -320,26 +311,28 @@ window.store = window.__module_store;
   window.__native.failStt = false;
   await send({ type: 'ma:audio:stop' });
 
-  // ── tabCapture 失敗時不能留下一台沒人管的辨識伺服器 ────────────
-  // 這條路很容易走到：Chrome 要求「該分頁叫用過擴充功能」才給音訊串流。
-  // 那時伺服器已經被拉起來了，如果沒收掉就等於白佔約 400 MB。
-  const realGetStreamId = window.chrome.tabCapture.getMediaStreamId;
+  // ── 沒有 streamId 就不該啟動 ────────────────────────────────
+  // streamId 是側邊欄在使用者手勢裡取得的。背景自己拿不到（手勢不跨
+  // sendMessage 傳過來），所以少了它只能請使用者去按那顆按鈕。
+  const noStream = await send({ type: 'ma:audio:start' });
+  check('沒有 streamId 時指向「開始聆聽」按鈕',
+    noStream?.ok === false && noStream.error.includes('開始聆聽'), JSON.stringify(noStream));
 
-  // Chrome 對 getMediaStreamId 的要求是**使用者手勢**，不是「擴充功能被叫用過」。
-  // 它給的錯誤訊息會把人帶往權限的方向（點圖示、重新整理、重新載入擴充功能），
-  // 但那些全都沒用 —— 曾經試過用 executeScript 自己補授權，同樣沒用。
-  // 所以錯誤訊息要直接講真正的解法：按側邊欄那顆按鈕。
-  window.chrome.tabCapture.getMediaStreamId = async () => {
-    throw new Error('Extension has not been invoked for the current page');
+  // ── offscreen 啟動失敗時不能留下一台沒人管的辨識伺服器 ─────────
+  // 那時伺服器已經被拉起來了，如果沒收掉就等於白佔約 400 MB。
+  const realSend = window.chrome.runtime.sendMessage;
+  window.chrome.runtime.sendMessage = async (m) => {
+    window.__sentToRuntime.push(m);
+    if (m.type === 'ma:offscreen:start') return { ok: false, error: '模擬的擷取失敗' };
+    return { ok: true };
   };
   window.__native.posted.length = 0;
-  const denied = await send({ type: 'ma:audio:start', tabId: 1 });
-  check('tabCapture 被拒時指向「開始聆聽」按鈕，而不是權限設定',
-    denied?.ok === false && denied.error.includes('開始聆聽'), JSON.stringify(denied));
-  check('tabCapture 被拒時會把已啟動的辨識伺服器收掉',
+  const offFail = await send({ type: 'ma:audio:start', streamId: 'stream-id' });
+  check('offscreen 啟動失敗時回報錯誤', offFail?.ok === false, JSON.stringify(offFail));
+  check('offscreen 啟動失敗時會把已啟動的辨識伺服器收掉',
     window.__native.posted.some((m) => m.type === 'sttStop'),
     JSON.stringify(window.__native.posted.map((m) => m.type)));
-  window.chrome.tabCapture.getMediaStreamId = realGetStreamId;
+  window.chrome.runtime.sendMessage = realSend;
 
   await send({ type: 'ma:audio:stop' });
 

@@ -137,6 +137,14 @@
     window.__sent.some((m) => m.type === 'ma:audio:start'),
     JSON.stringify(window.__sent.map((m) => m.type)));
 
+  // **getMediaStreamId 必須由側邊欄呼叫** —— 使用者手勢不會跨 sendMessage
+  // 傳到 service worker，交給背景呼叫的話 Chrome 會拒絕（按了沒反應）。
+  check('串流 id 由側邊欄自己取得（手勢只存在於這裡）',
+    window.__capturedTab === 77, `對著分頁 ${window.__capturedTab}`);
+  const startMsg = window.__sent.find((m) => m.type === 'ma:audio:start');
+  check('把取得的 streamId 交給背景，而不是叫背景自己去拿',
+    startMsg?.streamId === 'stream-id', JSON.stringify(startMsg));
+
   // 開始之後按鈕就收起來
   emit('status', { captionsFound: false, platform: 'google-meet', audioFallback: true });
   check('聆聽中時隱藏「開始聆聽」按鈕',

@@ -34,9 +34,19 @@ window.chrome = {
       if (msg.type === 'ma:settings:get') {
         return { sttAuto: true, sttEngine: 'whisper-native', captureScreen: false };
       }
+      // 側邊欄要先問背景哪個分頁是會議分頁，才能對它擷取音訊
+      if (msg.type === 'ma:meetingTab') return { tabId: window.__meetingTabId ?? 77 };
       return { ok: true };
     },
     openOptionsPage: () => {},
   },
   tabs: { query: async () => [{ id: 1 }] },
+  // getMediaStreamId 必須由側邊欄呼叫（使用者手勢不跨 sendMessage 傳到背景）
+  tabCapture: {
+    getMediaStreamId: async ({ targetTabId }) => {
+      window.__capturedTab = targetTabId;
+      if (window.__captureFails) throw new Error('Extension has not been invoked for the current page');
+      return 'stream-id';
+    },
+  },
 };

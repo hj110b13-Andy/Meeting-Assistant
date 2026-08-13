@@ -181,8 +181,13 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
       case 'ma:jitsi:sync':
         return reply?.(await syncJitsiScripts());
 
+      // 側邊欄要知道對哪個分頁擷取音訊。它自己用 tabs.query({active:true})
+      // 會拿到錯的（側邊欄是獨立情境），content script 回報的才可靠。
+      case 'ma:meetingTab':
+        return reply?.({ tabId: meetingTabId });
+
       case 'ma:audio:start':
-        return reply?.(await startAudioFallback(msg.tabId, msg.engine));
+        return reply?.(await startAudioFallback(msg.streamId, msg.engine));
 
       case 'ma:stt:status':      // 設定頁用：本機原生辨識裝好了沒
         return reply?.(await sttStatus());
@@ -639,16 +644,19 @@ async function ensureOffscreen() {
   });
 }
 
-async function startAudioFallback(tabId, engineOverride) {
+/**
+ * 開始聆聽。**streamId 由側邊欄取得後傳進來，不在這裡呼叫 tabCapture。**
+ *
+ * `chrome.tabCapture.getMediaStreamId()` 要求使用者手勢，而**手勢不會跨
+ * sendMessage 傳到 service worker** —— 之前是側邊欄按鈕送訊息、背景去呼叫，
+ * 背景那邊沒有手勢，所以按了永遠失敗（症狀：「按了沒反應」）。
+ * 現在側邊欄在點擊處理函式裡直接呼叫，只把拿到的 id 交過來。
+ */
+async function startAudioFallback(streamId, engineOverride) {
   const settings = await getSettings();
 
-  // 以 content script 回報的會議分頁為準。側邊欄傳來的是它用
-  // chrome.tabs.query({active:true}) 猜的，而側邊欄是獨立情境 ——
-  // 猜錯時 tabCapture 會對著錯的分頁要音訊，永遠拿不到（症狀就是
-  // 「無法擷取分頁音訊」一直重試，但你人明明就在會議裡）。
-  tabId = meetingTabId || tabId;
-  if (!tabId) {
-    const message = '找不到會議分頁。請先開啟 Google Meet / Teams / Jitsi 的會議分頁。';
+  if (!streamId) {
+    const message = '沒有拿到分頁音訊串流。請按側邊欄的「▶ 開始聆聽」。';
     reportError(new Error(message));
     return { ok: false, error: message };
   }
@@ -669,31 +677,6 @@ async function startAudioFallback(tabId, engineOverride) {
       sttNote = `原生本機辨識無法啟動（${String(err.message || err)}），已改用瀏覽器內建的備援引擎 —— 一樣免費，但較慢且中文準確度較差。想要更好的結果請執行 tools\\install-whisper.ps1。`;
       broadcast('audioNote', { message: sttNote });
     }
-  }
-
-  let streamId = null;
-  let captureErr = null;
-  try {
-    streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
-  } catch (err) {
-    captureErr = err;
-  }
-
-  if (!streamId) {
-    const raw = String(captureErr?.message || captureErr || '未知錯誤');
-    // Chrome 對這個 API 的要求是**使用者手勢**，不只是「擴充功能被叫用過」。
-    // 它給的錯誤訊息（"Extension has not been invoked for the current page"）
-    // 會讓人往權限的方向繞 —— 實測點圖示、重新整理分頁、重新載入擴充功能
-    // 全都沒用，因為那些都不產生手勢。所以這裡直接講真正的解法。
-    const message = /not been invoked|activeTab|gesture/i.test(raw)
-      ? '無法擷取分頁音訊：Chrome 要求由你按一下才能開始。請按側邊欄的「▶ 開始聆聽」。'
-      : `無法擷取分頁音訊：${raw}`;
-    // 上面可能已經把辨識伺服器拉起來了。這裡失敗就沒有東西會去停它，
-    // 而 small 模型是常駐約 400 MB —— 這條路很容易走到（tabCapture 常因為
-    // 沒先點過擴充功能圖示而失敗），不收掉的話等於白白佔著記憶體。
-    try { await sttShutdown(); } catch { /* 本來就沒起來 */ }
-    reportError(new Error(message));
-    return { ok: false, error: message };
   }
 
   await ensureOffscreen();
