@@ -1,22 +1,21 @@
+/**
+ * 設定頁。
+ *
+ * 刻意只留三個欄位：名字、背景筆記、自架 Jitsi 網域。後端、模型、辨識引擎、
+ * 摘要頻率全部寫死在 settings.js —— 每多一個開關就多一種設錯的方式，
+ * 而設錯的症狀（變慢、品質變差、安靜地不動）使用者根本看不出是設定造成的。
+ */
 const $ = (id) => document.getElementById(id);
-const FIELDS = ['provider', 'apiKey', 'model', 'effortSummary', 'effortAnswer', 'myNames', 'notes',
-  'deepgramKey', 'jitsiDomains', 'sttEngine', 'sttNativeModel'];
-const CHECKS = ['autoAnswer', 'fastAnswersLocal', 'captureScreen', 'micAuto', 'sttAuto', 'sttTraditional'];
+const FIELDS = ['myNames', 'notes', 'jitsiDomains'];
 
 async function load() {
   const s = await chrome.runtime.sendMessage({ type: 'ma:settings:get' });
   for (const f of FIELDS) if (s[f] !== undefined) $(f).value = s[f];
-  for (const c of CHECKS) $(c).checked = !!s[c];
-  $('summaryEverySegments').value = s.summaryEverySegments;
-  $('summaryEverySeconds').value = Math.round(s.summaryEveryMs / 1000);
 }
 
 $('save').addEventListener('click', async () => {
   const patch = {};
   for (const f of FIELDS) patch[f] = $(f).value.trim();
-  for (const c of CHECKS) patch[c] = $(c).checked;
-  patch.summaryEverySegments = Math.max(2, Number($('summaryEverySegments').value) || 8);
-  patch.summaryEveryMs = Math.max(15, Number($('summaryEverySeconds').value) || 300) * 1000;
   await chrome.runtime.sendMessage({ type: 'ma:settings:set', patch });
   $('saved').textContent = '已儲存 ✓';
   setTimeout(() => ($('saved').textContent = ''), 2500);
@@ -61,7 +60,7 @@ $('jitsiGrant').addEventListener('click', async () => {
  * 本機原生辨識的狀態。
  *
  * 「有沒有裝」使用者自己看不出來 —— 檔案在 %LOCALAPPDATA% 而不是擴充功能資料夾，
- * 而且失敗時擴充功能會安靜地退到 WASM 備援。所以給一顆按鈕問清楚。
+ * 而且失敗時擴充功能會退到 WASM 備援。所以給一顆按鈕問清楚。
  */
 $('sttCheck').addEventListener('click', async () => {
   $('sttState').textContent = '檢查中…';
@@ -83,34 +82,6 @@ $('sttStop').addEventListener('click', async () => {
   $('sttState').textContent = '停止中…';
   await chrome.runtime.sendMessage({ type: 'ma:stt:stop' });
   $('sttState').textContent = '已要求停止辨識伺服器（記憶體會還回來，下次用時自動重啟）';
-});
-
-$('test').addEventListener('click', async () => {
-  $('saved').textContent = '測試中…';
-  const key = $('apiKey').value.trim();
-  if (!key) { $('saved').textContent = '請先填入金鑰'; return; }
-  try {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-api-key': key,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true',
-      },
-      body: JSON.stringify({
-        model: $('model').value,
-        max_tokens: 16,
-        messages: [{ role: 'user', content: '回答「OK」兩個字。' }],
-      }),
-    });
-    const json = await res.json();
-    $('saved').textContent = res.ok
-      ? `連線正常 ✓（${json.model}）`
-      : `失敗（${res.status}）：${json?.error?.message || '未知錯誤'}`;
-  } catch (err) {
-    $('saved').textContent = `連線失敗：${err.message}`;
-  }
 });
 
 load();

@@ -16,6 +16,8 @@ tools/.opencc/
 
 # ── 執行時產生 ─────────────────────────────────────────────────
 tests/.tmp/
+# run-vendor-check.ps1 用的獨立 Chrome profile（離線驗證時建立）
+tests/.vendorprofile/
 
 # ── 平台雜物 ───────────────────────────────────────────────────
 Thumbs.db

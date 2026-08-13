@@ -72,7 +72,6 @@ function Convert-Module($src, $dest) {
 }
 Convert-Module (Join-Path $root 'src\background\store.js')          (Join-Path $tmp 'store.test.js')
 Convert-Module (Join-Path $root 'src\background\settings.js')       (Join-Path $tmp 'settings.test.js')
-Convert-Module (Join-Path $root 'src\background\claude.js')         (Join-Path $tmp 'claude.test.js')
 Convert-Module (Join-Path $root 'src\background\localmodel.js')     (Join-Path $tmp 'localmodel.test.js')
 Convert-Module (Join-Path $root 'src\background\claudecode.js')     (Join-Path $tmp 'claudecode.test.js')
 Convert-Module (Join-Path $root 'src\background\provider.js')       (Join-Path $tmp 'provider.test.js')
@@ -120,9 +119,18 @@ foreach ($p in $pages) {
   }
 
   $text = [System.Net.WebUtility]::HtmlDecode($m.Groups[1].Value)
+  $pagePass = 0; $pageFail = 0
   foreach ($line in ($text -split "`n")) {
-    if ($line -match '^PASS') { $totalPass++; Write-Host "  $line" -ForegroundColor DarkGreen }
-    elseif ($line -match '^FAIL') { $totalFail++; Write-Host "  $line" -ForegroundColor Red }
+    if ($line -match '^PASS') { $totalPass++; $pagePass++; Write-Host "  $line" -ForegroundColor DarkGreen }
+    elseif ($line -match '^FAIL') { $totalFail++; $pageFail++; Write-Host "  $line" -ForegroundColor Red }
+  }
+  # 一個測試頁跑出零項結果，代表它在載入時就死了（例如引用了不存在的腳本）。
+  # 不當成失敗的話，整個區塊會安靜地消失，而總數看起來仍然「全部通過」——
+  # 這比一個紅字還危險，因為沒有人會發現少跑了幾十項。
+  if ($pagePass -eq 0 -and $pageFail -eq 0) {
+    Write-Host "  這一頁沒有產生任何測試結果（載入時就失敗？）" -ForegroundColor Red
+    Write-Host "  頁面內容：$($text.Trim())" -ForegroundColor DarkGray
+    $totalFail++
   }
 }
 

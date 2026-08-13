@@ -11,15 +11,26 @@ Microsoft Teams / Jitsi Meet 的會議字幕，產生逐字稿、滾動式摘要
 
 ## 最高原則：只花 Claude Pro 訂閱的錢
 
-使用者已經買了 Claude Pro，**不接受任何按量計費的東西**。這條規則決定了很多設計：
+使用者已經買了 Claude Pro，**不接受任何按量計費的東西**。付費路線現在已經
+**整個從程式碼裡移除**，不只是預設關閉 —— 留著就有誤觸的可能：
 
-- 摘要與問答預設走 **Claude Code 橋接**（Native Messaging 呼叫本機 `claude.exe`，用訂閱額度）
-  或 **Chrome 內建 Gemini Nano**，不走 Claude API。
-- 語音辨識用**本機 whisper.cpp**，不用雲端服務。Deepgram 那條存在但預設關閉，
-  而且**自動啟動永遠不會選它** —— 自動花錢是不能接受的。
+- 摘要走 **Claude Code 橋接**（Native Messaging 呼叫本機 `claude.exe`，用訂閱額度），
+  即時回答走 **Chrome 內建 Gemini Nano**（本機執行）。兩者都免費。
+- 語音辨識用**本機 whisper.cpp**（small 模型）。Deepgram 那條已刪除。
+- `src/background/claude.js`（Claude API 用戶端）已刪除，`manifest.json` 也不再
+  要求 `api.anthropic.com` 的權限。`resolveProvider()` 不可能回傳付費後端，
+  背景測試有一項迴歸測試在守這件事。
 - 提出任何新方案前先確認它不會產生額外費用。會的話要先講清楚成本再問。
 
 Claude Pro 訂閱**不含 API 額度**，兩者是分開計費的。橋接是唯一能動用訂閱的路。
+
+## 第二原則：不要把選擇丟回給使用者
+
+使用者要的是「能用、好上手」，不是功能完整。後端、模型、辨識引擎、摘要頻率
+**全部寫死成實測最佳組合**，設定頁只留他非填不可的欄位（名字、背景筆記）。
+每多一個開關就多一種設錯的方式，而設錯的症狀（變慢、品質變差、安靜地不動）
+使用者根本看不出是設定造成的。側邊欄同理：按鈕從八顆砍到三顆，
+其餘動作（聽聲音、摘要）改成自動發生。
 
 ---
 
@@ -66,6 +77,17 @@ Chrome 保留 `_` 開頭給自己（`_metadata`、`_locales`）。資料夾裡�
 測試前先設 `[Console]::InputEncoding = New-Object Text.UTF8Encoding($false)`。
 `bridge/host.ps1` 現在也會主動吃掉開頭的 BOM 當保險。
 
+### 6. `bridge/host.bat` 是 Big5 編碼，不是 UTF-8
+
+裡面的中文註解是用 Big5（CP950）存的。用**以 UTF-8 讀寫的編輯工具**去改它，
+那些位元組會解碼失敗、被替換成 U+FFFD（`EF BF BD`），註解整片變成不可逆的亂碼。
+症狀很容易被誤判：終端機顯示本來就會亂碼，所以「看起來亂」不代表壞了 ——
+**要看實際位元組**（`od -c` 找 `357 277 275`）才分得出來。
+
+改這個檔案時只動 ASCII 的指令行，或用位元組層級的腳本、並以 `cp950` 編碼寫入新註解。
+順帶一提：`powershell.exe` 要用完整路徑，因為 `System32\WindowsPowerShell\v1.0`
+不一定在 `PATH` 裡（實測有機器被移掉），裸呼叫會讓橋接讀到 0 bytes 就結束。
+
 ---
 
 ## 測試
@@ -87,9 +109,21 @@ powershell -ExecutionPolicy Bypass -File tests\check-project.ps1  # 專案一致
 檔名裡的連字號會被換成底線（`globalThis.__module_whisper-native` 是語法錯誤，
 而且會**安靜地**讓整個模組不執行）。
 
+**測試頁卡住時症狀是「沒有任何輸出」。** 測試用的是微任務時鐘，`setTimeout`
+永遠不會走到，所以只要有一個 `await` 等不到回覆（例如 stub 沒處理 Claude Code 的
+`type:'run'`、或沒人回本機模型的 `ma:local:done`），整個頁面就靜靜停住，
+`#out` 停在「尚未執行」，看起來像頁面沒載入。新增後端呼叫時記得補上 stub 的自動回覆。
+`run.ps1` 現在會把「這一頁跑出零項結果」當成失敗 —— 以前不會，
+於是整個區塊消失時總數仍顯示「全部通過」，比一個紅字危險得多。
+
 **這些測試證明什麼、不證明什麼**：合成 DOM 驗證的是「選擇器與引擎邏輯自洽」，
-**不能**證明真實的 Meet DOM 長得跟合成的一樣。字幕選擇器**從來沒有在真實會議裡驗證過** ——
-那是目前最大的未知數，只有真的進一場會議能確認。
+**不能**證明真實的 Meet DOM 長得跟合成的一樣。
+
+字幕選擇器實測過一次，結果是**抓到 Meet 的介面文字而不是字幕**（鍵盤快速鍵提示、
+Gemini 橫幅、`arrow_drop_down`），因為 `heuristicRoot` 的門檻寫成
+「像字幕得 100 分 ＋ 文字長度最多 1 分」再取 `score >= 1` —— 一個完全不像字幕但
+文字夠長的元素剛好得 1.0 分就被接受。現在改成硬性條件：label 不像字幕就直接不考慮。
+**這也是後來把音訊改成主力的原因。**
 
 ---
 
@@ -102,7 +136,7 @@ powershell -ExecutionPolicy Bypass -File tests\check-project.ps1  # 專案一致
         ▼
 service worker（背景）
     ├─ store.js       逐字稿狀態、**照說話時間插入**、chrome.storage.local 備份
-    ├─ provider.js    後端切換（claude / chrome-ai / claude-code），分角色決定
+    ├─ provider.js    後端切換（chrome-ai / claude-code），分角色決定
     ├─ 摘要排程        兩個條件都成立才觸發（AND），失敗時退避
     └─ 提問偵測        問句 + 有沒有點到你的名字
         │ port 廣播
@@ -110,13 +144,19 @@ service worker（背景）
 側邊欄 panel.js
 ```
 
-**offscreen 文件**負責音訊：`tabCapture` → 降取樣到 16 kHz → 分段 → 三個引擎之一
-（原生 whisper.cpp / WASM whisper / Deepgram）→ 簡繁轉換 → 回報成 segment。
+**offscreen 文件**負責音訊：`tabCapture` → 降取樣到 16 kHz → 分段 → 兩個引擎之一
+（原生 whisper.cpp / WASM whisper 備援）→ 簡繁轉換 → 回報成 segment。
 
 幾個不明顯但重要的決定：
 
-- **逐字稿照「說話時間」排序，不是抵達順序。** 麥克風即時、本機辨識延遲十幾秒，
-  照抵達順序排會讓你自己晚說的話排在別人早說的話前面 —— 送去摘要的對話順序就是錯的。
+- **音訊是逐字稿的主要來源，字幕只拿來補說話者姓名。**
+  這個預設在真實會議實測後整個反過來了：Meet 的字幕斷斷續續、常常整段抓不到，
+  而本機 whisper 完整得多。字幕唯一的優勢是**有真實姓名**（whisper 拿不到），
+  所以退成「誰在講話」的資料源，靠說話時間比對回填到音訊段落上。
+  但**音訊沒在跑的時候字幕仍然要收** —— `tabCapture` 需要使用者先在會議分頁點過
+  擴充功能圖示，這步很容易漏掉，那時丟掉字幕等於整個功能靜靜失效。
+- **逐字稿照「說話時間」排序，不是抵達順序。** 不同來源的延遲差很多，
+  照抵達順序排會讓早講的話排在晚講的後面 —— 送去摘要的對話順序就是錯的。
 - **原生辨識另開一條 `connectNative`**，不跟 Claude Code 共用。`host.ps1` 是單執行緒循序
   處理訊息，共用的話「啟動辨識伺服器」會排在一個跑了 30 秒的 Claude Code 呼叫後面。
   附帶好處：連線關閉時 `host.ps1` 的 `finally` 會把伺服器一起收掉。

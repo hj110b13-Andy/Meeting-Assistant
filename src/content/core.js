@@ -231,7 +231,17 @@
     }
   }
 
-  /** 找不到已知選擇器時，用 aria 屬性／文字特徵猜字幕容器 */
+  /**
+   * 找不到已知選擇器時，用 aria 屬性猜字幕容器。
+   *
+   * **只接受 label 真的像字幕的元素。** 這裡曾經用「像字幕得 100 分 ＋ 文字長度
+   * 最多 1 分」再取 score >= 1，結果是一個完全不像字幕、但文字夠長（>=400 字）的
+   * 元素剛好得 1.0 分就被接受 —— 實測會抓到 Meet 的鍵盤快速鍵提示、Gemini 橫幅、
+   * 「會議記錄器」這類介面文字，整份逐字稿都是同一句重複幾十次。
+   *
+   * 抓不到字幕時**回傳 null 讓上層明講「沒偵測到字幕」**，比拿介面文字充數好：
+   * 錯的逐字稿會一路汙染摘要與回答建議，而且使用者看不出來是壞的。
+   */
   function heuristicRoot(keywords = /caption|subtitle|字幕|транскр/i) {
     const cands = [
       ...document.querySelectorAll('[aria-live="polite"],[aria-live="assertive"],[role="region"],[role="log"]'),
@@ -239,13 +249,15 @@
     let best = null;
     for (const el of cands) {
       const label = `${el.getAttribute('aria-label') || ''} ${el.getAttribute('data-tid') || ''} ${el.className || ''}`;
-      const looksLikeCaption = keywords.test(label);
+      // 硬性條件，不是加分項：label 不像字幕就直接不考慮
+      if (!keywords.test(label)) continue;
       const txt = clean(el.textContent);
       if (!txt || txt.length < 2) continue;
-      const score = (looksLikeCaption ? 100 : 0) + Math.min(txt.length, 400) / 400;
+      // 都像字幕的話，取文字最多的那個（巢狀容器裡通常最外層才是完整面板）
+      const score = Math.min(txt.length, 400) / 400;
       if (!best || score > best.score) best = { el, score };
     }
-    return best && best.score >= 1 ? best.el : null;
+    return best ? best.el : null;
   }
 
   globalThis.__MA_CORE__ = { CaptionEngine, mergeCaption, overlaps, genericParse, heuristicRoot, clean };

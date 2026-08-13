@@ -18,7 +18,6 @@
   ],
   "host_permissions": [
     "http://127.0.0.1:8317/*",
-    "https://api.anthropic.com/*",
     "https://meet.google.com/*",
     "https://teams.microsoft.com/*",
     "https://teams.live.com/*",

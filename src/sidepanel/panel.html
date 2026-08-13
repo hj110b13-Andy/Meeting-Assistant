@@ -11,19 +11,20 @@
       <span id="statusDot" class="dot" title="字幕狀態"></span>
       <div class="titles">
         <strong id="meetingTitle">尚未偵測到會議</strong>
-        <small id="statusText">請開啟 Google Meet 或 Teams 會議並啟用字幕</small>
+        <small id="statusText">開啟 Google Meet / Teams / Jitsi 會議後自動開始</small>
       </div>
       <span id="providerBadge" class="pill" title="目前使用的模型後端"></span>
     </div>
+    <!--
+      刻意只留三顆。原本有八顆（啟用模型／存檔／麥克風／聽聲音／摘要／匯出／清除／設定），
+      但其中一半是「應該自動發生的事」被做成按鈕：聽分頁聲音現在進會議就自動開始、
+      摘要本來就會定期更新、免費模型第一次用到時才下載。按鈕越多越像要先讀說明書。
+    -->
     <div class="row tools">
-      <button id="btnLocal" class="ghost hidden" title="下載並啟用 Chrome 內建模型，完全免費且離線執行">⚡ 啟用免費模型</button>
-      <button id="btnSnapshot" class="ghost" title="把會議畫面截圖與逐字稿存到下載資料夾，之後用 Claude Code（Pro 額度）分析">📸 存檔給 Claude Code</button>
-      <button id="btnMic" class="ghost" title="用麥克風辨識我自己說的話（瀏覽器內建，免金鑰）">🎤 我的麥克風</button>
-      <button id="btnAudio" class="ghost" title="沒有字幕時，聽分頁的聲音轉成逐字稿。預設用本機模型，免費且不外流">🔊 聽會議聲音</button>
-      <button id="btnSummary" class="ghost" title="立即重新產生摘要">↻ 摘要</button>
-      <button id="btnExport" class="ghost" title="複製 Markdown 逐字稿">⬇ 匯出</button>
+      <button id="btnLocal" class="ghost hidden" title="下載並啟用本機模型，完全免費且離線執行">⚡ 啟用免費模型</button>
+      <button id="btnExport" class="ghost" title="複製 Markdown 逐字稿，並下載一份備份">⬇ 匯出</button>
       <button id="btnClear" class="ghost danger" title="清除本場逐字稿">✕ 清除</button>
-      <button id="btnOptions" class="ghost" title="設定">⚙</button>
+      <button id="btnOptions" class="ghost" title="設定我的名字與背景筆記">⚙</button>
     </div>
     <div id="banner" class="banner hidden"></div>
   </header>

@@ -1,5 +1,5 @@
 /**
- * 聽會議分頁的聲音，轉成逐字稿。三個引擎：
+ * 聽會議分頁的聲音，轉成逐字稿。兩個引擎，**都在本機執行、零費用**：
  *
  *   whisper-native — 本機執行的 whisper.cpp（%LOCALAPPDATA%\MeetingAssistant\whisper），
  *                    由 bridge 啟動成一台只綁 127.0.0.1 的小伺服器，音訊用 HTTP 送過去。
@@ -7,9 +7,11 @@
  *                    中文準確度遠勝 WASM 那條的 base 模型。這是預設。
  *   whisper        — 瀏覽器內的 WASM（vendor/ 裡的 whisper-base + ONNX Runtime）。
  *                    不必安裝任何東西，但慢、而且中文明顯較差。原生那條不可用時的備援。
- *   deepgram       — 雲端串流，要金鑰、按量計費，但有聲學分群（講者 1／2）且延遲低。
  *
- * 三者都拿不到真實姓名 —— 姓名只有平台字幕才有。
+ * 曾經有第三條 Deepgram（雲端、按量計費），已整個移除：這個專案只花
+ * Claude Pro 訂閱的錢，留著付費路線就有誤觸的可能。
+ *
+ * 兩者都拿不到真實姓名 —— 姓名只有平台字幕才有，所以字幕會拿來做姓名校正。
  *
  * ── 分段長度是量出來的，不是猜的 ────────────────────────────────
  * whisper 的編碼器不論音檔多長都跑滿 30 秒的窗，所以**每次呼叫有固定成本**，
@@ -58,8 +60,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
   if (msg?.type === 'ma:offscreen:start') {
     const opts = msg.options || {};
     let run;
-    if (msg.engine === 'deepgram') run = startDeepgram(msg.streamId, msg.deepgramKey);
-    else if (msg.engine === 'whisper') run = startWhisperWasm(msg.streamId, opts);
+    if (msg.engine === 'whisper') run = startWhisperWasm(msg.streamId, opts);
     else run = startWhisperNative(msg.streamId, opts);
     run.then(() => reply({ ok: true }))
       .catch((err) => reply({ ok: false, error: String(err.message || err) }));
@@ -85,58 +86,6 @@ async function captureTab(streamId) {
   return src;
 }
 
-async function startDeepgram(streamId, deepgramKey) {
-  stop();
-  engineName = 'deepgram';
-  await captureTab(streamId);
-
-  const params = new URLSearchParams({
-    model: 'nova-3',
-    language: 'multi',
-    smart_format: 'true',
-    punctuate: 'true',
-    diarize: 'true',
-    interim_results: 'true',
-  });
-  socket = new WebSocket(`wss://api.deepgram.com/v1/listen?${params}`, ['token', deepgramKey]);
-
-  socket.onopen = () => {
-    recorder = new MediaRecorder(mediaStream, { mimeType: 'audio/webm;codecs=opus' });
-    recorder.ondataavailable = (e) => {
-      if (e.data.size > 0 && socket?.readyState === WebSocket.OPEN) socket.send(e.data);
-    };
-    recorder.start(250);
-  };
-
-  socket.onmessage = (event) => {
-    let data;
-    try { data = JSON.parse(event.data); } catch { return; }
-    const alt = data?.channel?.alternatives?.[0];
-    if (!alt?.transcript) return;
-
-    // 用 diarization 的 speaker 編號當說話者標籤
-    const speakerNum = alt.words?.[0]?.speaker;
-    const speaker = speakerNum === undefined ? '講者（音訊）' : `講者 ${speakerNum + 1}`;
-
-    let live = liveBySpeaker.get(speaker);
-    if (!live) {
-      live = { id: `${sessionId}-${speaker}-${Date.now().toString(36)}`, text: '' };
-      liveBySpeaker.set(speaker, live);
-    }
-
-    if (data.is_final) {
-      liveBySpeaker.delete(speaker);
-      emit(live.id, speaker, alt.transcript, true);
-    } else {
-      emit(live.id, speaker, alt.transcript, false);
-    }
-  };
-
-  socket.onerror = () => notifyError('語音辨識連線發生錯誤，請確認 Deepgram 金鑰是否有效。');
-  socket.onclose = (e) => {
-    if (e.code !== 1000) notifyError(`語音辨識連線中斷（code ${e.code}）。`);
-  };
-}
 
 // ── 音訊處理（兩條 whisper 共用） ───────────────────────────────
 function downsample(input, fromRate) {

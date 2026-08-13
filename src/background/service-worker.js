@@ -197,15 +197,67 @@ function reportError(err) {
   broadcast('error', { message });
 }
 
-// ── 字幕進來 ────────────────────────────────────────────────────
+/**
+ * 字幕最近講過話的人，用來替本機辨識的段落補上真實姓名。
+ *
+ * whisper 拿不到姓名（它只有聲音），平台字幕才有。字幕本身斷斷續續、
+ * 不適合當逐字稿，但「誰在講話」這個資訊仍然可靠，所以留下來做校正：
+ * 音訊段落落在某則字幕的時間附近時，就借用那則字幕的說話者。
+ *
+ * 只保留最近的幾筆 —— 這是即時比對，不需要整場歷史。
+ */
+const recentCaptionSpeakers = [];
+const SPEAKER_MEMORY = 12;
+const SPEAKER_MATCH_MS = 20000;   // 本機辨識延遲約 15–18 秒，抓寬一點
+
+function rememberCaptionSpeaker(seg) {
+  const speaker = seg.speaker;
+  if (!speaker || speaker === '未標註') return;
+  recentCaptionSpeakers.push({ speaker, at: seg.startedAt || seg.ts || Date.now() });
+  if (recentCaptionSpeakers.length > SPEAKER_MEMORY) recentCaptionSpeakers.shift();
+}
+
+/** 找出這段音訊「說話當下」字幕記到的是誰；找不到就回傳 null */
+function speakerAt(ts) {
+  let best = null;
+  for (const c of recentCaptionSpeakers) {
+    const gap = Math.abs(c.at - ts);
+    if (gap > SPEAKER_MATCH_MS) continue;
+    if (!best || gap < best.gap) best = { speaker: c.speaker, gap };
+  }
+  return best?.speaker || null;
+}
+
+// ── 逐字稿段落進來 ──────────────────────────────────────────────
 async function onSegment(seg) {
-  // 只有字幕來源可以「開新會議」。音訊備援與字幕會同時存在，
-  // 若讓它也重設 session，逐字稿會被清空。
+  // 只有字幕來源可以「開新會議」。音訊與字幕會同時存在，
+  // 若讓音訊也重設 session，逐字稿會被清空。
   if (seg.source !== 'audio') {
     store.startMeetingIfNeeded({
       sessionId: seg.sessionId, platform: seg.platform, title: seg.title, url: seg.url,
     });
   }
+
+  // **音訊在跑的時候，字幕只提供姓名、不進逐字稿。**
+  //
+  // 實測真實會議的 Meet 字幕斷斷續續、常常整段抓不到，拿它當逐字稿的結果是
+  // 內容殘缺又重複；本機 whisper 反而完整得多。所以音訊是主要的逐字稿來源，
+  // 字幕退成「誰在講話」的資料源 —— 各取所長，也不會同一句話記兩次。
+  //
+  // 但**音訊沒在跑的時候字幕仍然要收**：tabCapture 需要使用者先在會議分頁點過
+  // 擴充功能圖示，這一步很容易漏掉。那種情況下丟掉字幕等於整個功能靜靜地失效，
+  // 有殘缺的逐字稿仍然勝過空白。
+  if (seg.source === 'captions') {
+    if (seg.final) rememberCaptionSpeaker(seg);
+    if (store.getState().status?.audioFallback) return;
+  }
+
+  // 本機辨識標的是「其他人（本機辨識）」這類佔位字串，能對上字幕就換成真名
+  if (seg.source === 'audio') {
+    const real = speakerAt(seg.startedAt || seg.ts || Date.now());
+    if (real) seg = { ...seg, speaker: real };
+  }
+
   const { isNewFinal, segment } = store.upsertSegment(seg);
   broadcast(seg.final ? 'segment' : 'partial', segment);
 
@@ -325,7 +377,7 @@ async function runSummary(force) {
     const { text } = await complete({
       role: 'summary',
       maxTokens: 4096,
-      effort: settings.effortSummary,
+      effort: 'medium',        // 摘要可以慢，換品質
       thinking: { type: 'adaptive' },
       format: limits.structuredJson ? SUMMARY_SCHEMA : undefined,
       system: [{ type: 'text', text: rules }],
@@ -432,7 +484,7 @@ async function answerQuestion({ question, asker, manual, withScreen }) {
       provider,
       maxTokens: 1200,
       imagePath,
-      effort: settings.effortAnswer,
+      effort: 'low',
       // 即時回答重點是延遲：關閉思考，靠上下文與低 effort 換速度。
       thinking: { type: 'disabled' },
       system: [
@@ -551,16 +603,9 @@ async function ensureOffscreen() {
 async function startAudioFallback(tabId, engineOverride) {
   const settings = await getSettings();
 
-  // 預設走本機辨識：零費用、不需金鑰。只有明確選了 deepgram（或設定裡
-  // 偏好雲端而且有金鑰）才走雲端那條，因為那條會按量計費。
-  let engine = engineOverride
-    || (settings.sttEngine === 'deepgram' && settings.deepgramKey ? 'deepgram' : settings.sttEngine)
-    || 'whisper-native';
-  if (engine === 'deepgram' && !settings.deepgramKey) {
-    const message = '雲端語音辨識需要 Deepgram 金鑰。留空的話請改用本機辨識（免費）。';
-    reportError(new Error(message));
-    return { ok: false, error: message };
-  }
+  // 只有本機引擎。雲端那條（Deepgram）會按量計費，已整個移除 ——
+  // 使用者的要求是只花 Claude Pro 訂閱的錢，留著就有誤觸的可能。
+  let engine = engineOverride || settings.sttEngine || 'whisper-native';
 
   // 原生辨識要先請 bridge 把 whisper-server 拉起來。裝不起來就退回
   // 瀏覽器內的 WASM ——「慢一點但有東西」勝過整個功能靜靜地失敗。
@@ -599,7 +644,6 @@ async function startAudioFallback(tabId, engineOverride) {
     type: 'ma:offscreen:start',
     streamId,
     engine,
-    deepgramKey: settings.deepgramKey,
     options: {
       modelId: settings.sttModel || 'Xenova/whisper-base',
       model: settings.sttNativeModel || 'small',

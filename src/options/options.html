@@ -13,243 +13,94 @@
       margin: 0; padding: 28px 20px; background: var(--bg); color: var(--fg);
       font: 14px/1.6 "Noto Sans TC", -apple-system, "Segoe UI", system-ui, sans-serif;
     }
-    .wrap { max-width: 680px; margin: 0 auto; }
+    .wrap { max-width: 620px; margin: 0 auto; }
     h1 { font-size: 20px; margin: 0 0 4px; }
     .sub { color: var(--dim); font-size: 13px; margin: 0 0 22px; }
     fieldset { border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px 18px; margin: 0 0 18px; background: var(--card); }
     legend { padding: 0 6px; font-weight: 600; font-size: 13px; }
     label { display: block; margin-top: 12px; }
     label > span { display: block; font-size: 12px; color: var(--dim); margin-bottom: 4px; }
-    input[type="text"], input[type="password"], input[type="number"], select, textarea {
+    input[type="text"], textarea {
       width: 100%; font: inherit; padding: 7px 9px; border: 1px solid var(--line);
       border-radius: 6px; background: var(--bg); color: var(--fg);
     }
     textarea { resize: vertical; }
-    .inline { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
-    .inline input { width: auto; }
-    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
     .hint { font-size: 12px; color: var(--dim); margin: 6px 0 0; }
     button { font: inherit; padding: 8px 18px; border-radius: 7px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
     button.sec { background: transparent; color: var(--accent); }
-    .bar { display: flex; gap: 10px; align-items: center; }
-    #saved { color: var(--accent); font-size: 13px; }
-    a { color: var(--accent); }
+    .bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    #saved, #sttState, #jitsiState { color: var(--accent); font-size: 13px; }
+    details { margin: 0 0 18px; }
+    summary { cursor: pointer; font-size: 13px; color: var(--dim); }
+    details fieldset { margin-top: 12px; }
+    code { background: rgba(127,127,127,.14); padding: 1px 5px; border-radius: 4px; }
   </style>
 </head>
 <body>
 <div class="wrap">
   <h1>會議助手設定</h1>
-  <p class="sub">設定會存在這台電腦的擴充功能儲存區（chrome.storage.local），不會上傳到任何伺服器。</p>
+  <p class="sub">
+    設定存在這台電腦，不會上傳。<strong>只有下面兩欄需要你填</strong> ——
+    其餘（模型、辨識引擎、摘要頻率）都已經設成實測最好的組合，而且全部免費。
+  </p>
 
   <fieldset>
-    <legend>模型後端</legend>
+    <legend>你是誰</legend>
     <label>
-      <span>摘要與問答要用哪個模型</span>
-      <select id="provider">
-        <option value="auto">自動（有金鑰用 Claude API，沒有就用免費的 Chrome 內建模型）</option>
-        <option value="claude-code">Claude Code（用 Claude Pro 訂閱額度，免費，品質最好但較慢）</option>
-        <option value="chrome-ai">Chrome 內建模型（完全免費、離線、最快，能力最弱）</option>
-        <option value="claude">Claude API（品質最好又即時、支援看畫面，按量計費）</option>
-      </select>
-    </label>
-    <div class="inline">
-      <input id="fastAnswersLocal" type="checkbox">
-      <label for="fastAnswersLocal" style="margin:0"><span style="margin:0">選 Claude Code 時，「即時回答」改用 Chrome 內建模型（建議開啟）</span></label>
-    </div>
-    <p class="hint">
-      <strong>Claude Code</strong>透過本機橋接呼叫你已登入的 Claude Code，用的是 <strong>Claude Pro 訂閱額度，不會按量計費</strong>。
-      需先執行一次 <code>bridge\install.ps1</code> 註冊橋接。缺點是每次呼叫要 10–30 秒（每次都重新啟動 CLI），
-      所以摘要很適合、即時回答不適合 —— 這就是上面那個勾選項的用途：摘要走 Claude Code，即時回答走本機模型，兩者都免費。<br>
-      <strong>Chrome 內建模型</strong>是 Gemini Nano，跑在你電腦上：零費用、資料不外流、1–3 秒，但 context 小、看不懂畫面、中文品質最弱。
-      首次使用需在側邊欄按「⚡ 啟用免費模型」下載一次模型。<br>
-      <strong>注意</strong>：Claude Pro／Max 訂閱<strong>不含 API 額度</strong>。上面的「Claude API」選項是另外按量計費的，
-      不會動用你的訂閱；反之「Claude Code」動用訂閱，不會產生 API 費用。
-    </p>
-  </fieldset>
-
-  <fieldset>
-    <legend>Claude API（選用）</legend>
-    <label>
-      <span>Anthropic API 金鑰</span>
-      <input id="apiKey" type="password" placeholder="sk-ant-...">
-    </label>
-    <p class="hint">
-      在 <a href="https://platform.claude.com/settings/keys" target="_blank" rel="noreferrer">platform.claude.com</a> 建立。
-      金鑰存在瀏覽器本機，摘要與問答會直接從擴充功能呼叫 Claude API。
-      若要多人共用，建議改成由自己的後端代理呼叫，不要散發金鑰。
-    </p>
-    <div class="grid">
-      <label>
-        <span>模型</span>
-        <select id="model">
-          <option value="claude-sonnet-5">claude-sonnet-5（速度與品質平衡，建議）</option>
-          <option value="claude-opus-5">claude-opus-5（品質最高，較慢較貴）</option>
-          <option value="claude-haiku-4-5">claude-haiku-4-5（最快最便宜）</option>
-        </select>
-      </label>
-      <label>
-        <span>摘要 effort</span>
-        <select id="effortSummary">
-          <option value="low">low</option>
-          <option value="medium">medium（建議）</option>
-          <option value="high">high</option>
-        </select>
-      </label>
-      <label>
-        <span>即時回答 effort</span>
-        <select id="effortAnswer">
-          <option value="low">low（建議：延遲最低）</option>
-          <option value="medium">medium</option>
-          <option value="high">high</option>
-        </select>
-      </label>
-    </div>
-  </fieldset>
-
-  <fieldset>
-    <legend>即時回答</legend>
-    <label>
-      <span>我的名字／稱呼（逗號分隔）— 別人講到這些字時視為在問我</span>
+      <span>我的名字／稱呼（逗號分隔）</span>
       <input id="myNames" type="text" placeholder="例：小陳, 陳先生, Ken">
     </label>
-    <div class="inline">
-      <input id="autoAnswer" type="checkbox">
-      <label for="autoAnswer" style="margin:0"><span style="margin:0">偵測到有人點名問我時，自動產生回答建議</span></label>
-    </div>
-    <div class="inline">
-      <input id="captureScreen" type="checkbox">
-      <label for="captureScreen" style="margin:0"><span style="margin:0">提問時預設勾選「附上會議畫面」</span></label>
-    </div>
     <p class="hint">
-      附上畫面才看得懂共享的圖表、簡報或程式碼。走 Claude Code 時是把截圖存成 PNG、讓它用 Read 工具讀檔，
-      所以<strong>不會</strong>產生 API 費用，但多一次工具往返：實測純文字 4.6 秒、附圖 10–17 秒，而且多耗 Pro 額度。
-      Chrome 內建模型看不懂圖片，勾了也沒用（會在答案卡片上說明）。這只是預設值，每次提問都能在側邊欄單獨勾選。
-    </p>
-    <div class="inline">
-      <input id="micAuto" type="checkbox">
-      <label for="micAuto" style="margin:0"><span style="margin:0">抓不到字幕時，自動開啟麥克風記錄我自己的發言</span></label>
-    </div>
-    <p class="hint">
-      不會無條件開啟：平台字幕本來就包含你自己的發言（還帶真實姓名），兩邊都收會讓同一句話在逐字稿裡出現兩次。
-      所以只在狀態燈是黃色（找到會議但沒字幕）時自動開，字幕一恢復就自動關。
-      首次需要按一次「🎤 我的麥克風」授權麥克風，之後才能自動啟動。
+      <strong>這欄一定要填。</strong>別人在會議裡講到這些名字時，才會自動幫你準備回答建議。
+      沒填的話「問答」分頁只能手動提問。多寫幾種叫法（全名、綽號、英文名）比較不會漏。
     </p>
     <label>
-      <span>我的背景筆記（回答建議會參考這裡的資訊）</span>
+      <span>我的背景筆記（回答建議會參考）</span>
       <textarea id="notes" rows="6" placeholder="例：我負責金流後端。Q3 目標是把結帳失敗率降到 1% 以下。目前卡在第三方對帳 API 尚未開通，預計 8/20 完成。"></textarea>
     </label>
-    <p class="hint">寫得越具體，回答建議越能直接使用。不要放密碼或金鑰。</p>
-  </fieldset>
-
-  <fieldset>
-    <legend>摘要頻率</legend>
-    <div class="grid">
-      <label>
-        <span>至少累積幾段發言才更新</span>
-        <input id="summaryEverySegments" type="number" min="2" max="50">
-      </label>
-      <label>
-        <span>且距上次至少幾秒（最短間隔）</span>
-        <input id="summaryEverySeconds" type="number" min="15" max="1800">
-      </label>
-    </div>
-    <p class="hint">
-      <strong>兩個條件都要成立才會自動摘要。</strong>秒數是最短間隔，也就是真正的節流上限：設 300 就是「最多每 5 分鐘一次」，
-      即使中間累積了 50 段也會等到時間到。段數則是「至少要有這麼多新內容才值得花一次額度」，避免冷場時為兩句話跑一次模型。
-      想立刻要一份就按側邊欄的 ↻ 摘要 —— 手動觸發不受這兩個限制。<br>
-      走 Claude Code 的話請把秒數設大一些（建議 300 以上）：它每次呼叫都是一個完整的 CLI session，一分鐘一次會很快撞到 Pro 的用量上限。<br>
-      摘要是累積式更新：每次只把「新增的逐字稿」送給模型，不重送整場，成本大致與會議長度成線性而非平方。
-    </p>
-  </fieldset>
-
-  <fieldset>
-    <legend>自架的 Jitsi Meet（選填）</legend>
-    <label>
-      <span>自架 Jitsi 網域（逗號分隔）</span>
-      <input id="jitsiDomains" type="text" placeholder="例：jitsi.mycompany.com, meet.example.org">
-    </label>
-    <div class="bar" style="margin-top:10px">
-      <button id="jitsiGrant" class="sec" type="button">授權並啟用這些網域</button>
-      <span id="jitsiState"></span>
-    </div>
-    <p class="hint">
-      公開站 <code>meet.jit.si</code> 與 <code>8x8.vc</code> <strong>不需要設定</strong>，安裝好就能用。
-      這裡只給自架站：Jitsi 可以自己架，網域無法事先列舉，所以要你授權後再動態註冊內容腳本。
-      填好網域按上面那顆按鈕，Chrome 會跳出權限確認 —— <strong>必須從這個頁面按</strong>，因為權限請求需要使用者手勢。<br>
-      注意 Jitsi 的字幕靠部署端的 Jigasi 轉錄服務。<strong>自架站若沒安裝 Jigasi，會議裡根本沒有字幕可抓</strong>，
-      這時只能用「🎤 我的麥克風」記錄你自己的發言。
-    </p>
-  </fieldset>
-
-  <fieldset>
-    <legend>聽會議聲音（沒有字幕時用）</legend>
-    <label>
-      <span>語音辨識引擎</span>
-      <select id="sttEngine">
-        <option value="whisper-native">本機原生 whisper.cpp（建議：免費、離線、中文最準）</option>
-        <option value="whisper">瀏覽器內建 WASM（免安裝，但慢且中文較差）</option>
-        <option value="deepgram">Deepgram 雲端（延遲低、有講者分群，按量計費）</option>
-      </select>
-    </label>
-    <div class="grid">
-      <label>
-        <span>原生引擎的模型</span>
-        <select id="sttNativeModel">
-          <option value="small">small（建議：中文準，RTF 0.47）</option>
-          <option value="base">base（快三倍，但中文明顯會聽錯）</option>
-        </select>
-      </label>
-    </div>
-    <div class="bar" style="margin-top:10px">
-      <button id="sttCheck" class="sec" type="button">檢查本機原生辨識</button>
-      <button id="sttStop" class="sec" type="button">停止辨識伺服器</button>
-      <span id="sttState"></span>
-    </div>
-    <div class="inline">
-      <input id="sttAuto" type="checkbox">
-      <label for="sttAuto" style="margin:0"><span style="margin:0">偵測到會議沒有字幕時，自動開始聽分頁聲音（僅本機引擎）</span></label>
-    </div>
-    <div class="inline">
-      <input id="sttTraditional" type="checkbox">
-      <label for="sttTraditional" style="margin:0"><span style="margin:0">把辨識結果轉成繁體中文（台灣用字）</span></label>
-    </div>
-    <p class="hint">
-      Meet 和 Teams 有內建字幕，用不到這個。它是為<strong>沒有字幕的會議</strong>準備的 ——
-      例如沒安裝 Jigasi 轉錄服務的自架 Jitsi，或公開的 <code>meet.jit.si</code>（實測 <code>transcription.enabled: false</code>）。<br>
-
-      <strong>本機原生 whisper.cpp</strong> 需要跑一次 <code>tools\install-whisper.ps1</code>
-      （下載約 260 MB 到 <code>%LOCALAPPDATA%\MeetingAssistant\whisper</code>）。
-      它跑成一台只綁 <code>127.0.0.1</code> 的小伺服器，由 bridge 在需要時啟動、停止擷取時關掉，
-      <strong>零費用、資料完全不離開你的電腦</strong>。
-      實測 RTF：small 模型 12 秒一段是 0.47、base 是 0.17。
-      用 small 是因為中文差距很大 —— 同一段音訊 base 把「這季／結帳／對帳／小陳」全聽錯，small 全對，
-      而原生 small 的速度還比瀏覽器內建的 base 更快。<br>
-
-      <strong>瀏覽器內建 WASM</strong> 的模型在 <code>vendor/</code>（約 99 MB），不必安裝任何東西，
-      但只有 base 模型、RTF 約 0.5，做成 20 秒一段。原生引擎啟動失敗時會自動退到這條，並在側邊欄說明。<br>
-
-      開會時 CPU 被視訊佔用可能讓辨識跟不上。跟不上時會略過片段、在側邊欄明確告知，
-      並<strong>自動把分段拉長</strong>（每次辨識有固定成本，段落越長每秒成本越低）—— 而不是安靜地爛掉。<br>
-
-      三個引擎都<strong>拿不到真實姓名</strong>：本機引擎標成「其他人（本機辨識）」，Deepgram 標成「講者 1／2」。
-      真實姓名只有平台字幕才有，所以<strong>有字幕時一律優先用字幕</strong>。
-      自動啟動只在本機引擎下生效 —— 自動花錢是不能接受的。<br>
-
-      繁體轉換是在辨識完之後用字表（OpenCC 資料）做的，不是靠提示詞。
-      實測用繁體 initial prompt 引導雖然讓輸出變繁體，卻會把「對帳」聽成「對戰／對象」——
-      換到腳本對、內容錯，不划算。
-    </p>
-    <label>
-      <span>Deepgram API 金鑰（只有選雲端才需要）</span>
-      <input id="deepgramKey" type="password" placeholder="留空即可，本機引擎不需要金鑰">
-    </label>
+    <p class="hint">寫得越具體，回答建議越能直接照唸。不要放密碼或金鑰。</p>
   </fieldset>
 
   <div class="bar">
     <button id="save">儲存設定</button>
-    <button id="test" class="sec">測試 API 連線</button>
     <span id="saved"></span>
   </div>
+
+  <details>
+    <summary>進階（通常不必動）</summary>
+
+    <fieldset>
+      <legend>本機語音辨識</legend>
+      <div class="bar">
+        <button id="sttCheck" class="sec" type="button">檢查安裝狀態</button>
+        <button id="sttStop" class="sec" type="button">停止辨識伺服器</button>
+        <span id="sttState"></span>
+      </div>
+      <p class="hint">
+        逐字稿是用本機的 whisper.cpp（small 模型）辨識會議聲音，<strong>零費用、資料不離開這台電腦</strong>。
+        需要跑過一次 <code>tools\install-whisper.ps1</code>。
+        辨識伺服器會在開始聆聽時自動啟動、停止時自動關掉，常駐約 400 MB 記憶體，
+        上面那顆「停止」只是想提早把記憶體要回來時用的。
+      </p>
+    </fieldset>
+
+    <fieldset>
+      <legend>自架的 Jitsi Meet</legend>
+      <label>
+        <span>自架 Jitsi 網域（逗號分隔）</span>
+        <input id="jitsiDomains" type="text" placeholder="例：jitsi.mycompany.com, meet.example.org">
+      </label>
+      <div class="bar" style="margin-top:10px">
+        <button id="jitsiGrant" class="sec" type="button">授權並啟用這些網域</button>
+        <span id="jitsiState"></span>
+      </div>
+      <p class="hint">
+        公開站 <code>meet.jit.si</code> 與 <code>8x8.vc</code> <strong>不需要設定</strong>，安裝好就能用。
+        這裡只給自架站：Jitsi 可以自己架，網域無法事先列舉，所以要你授權後再動態註冊內容腳本。
+        填好網域按上面那顆按鈕 —— <strong>必須從這個頁面按</strong>，因為權限請求需要使用者手勢。
+      </p>
+    </fieldset>
+  </details>
 </div>
 <script src="options.js"></script>
 </body>

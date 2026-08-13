@@ -7,8 +7,9 @@ let state = { segments: [], partials: [], summary: null, answers: [], status: {}
 let unseenInsights = 0;
 let unseenQa = 0;
 let activeTab = 'transcript';
-// 側邊欄需要知道 micAuto（自動開麥克風）、captureScreen（提問預設附畫面）、
-// 以及有沒有 Deepgram 金鑰（沒有就把音訊備援藏起來）。在 loadSettings() 填入。
+let summaryRunning = false;    // 顯示在狀態列（摘要按鈕已移除）
+// 側邊欄需要知道 sttAuto（自動聽分頁聲音）與 captureScreen（提問預設附畫面）。
+// 在 loadSettings() 填入。
 let settings = null;
 
 // ── 說話者顏色：同一個名字永遠同一個色 ──────────────────────────
@@ -73,7 +74,9 @@ port.onMessage.addListener(({ type, payload }) => {
       renderInsights();
       break;
     case 'summaryStatus':
-      $('btnSummary').classList.toggle('on', payload.running);
+      // 摘要按鈕已移除（摘要本來就會自動更新），進行中的狀態顯示在狀態列
+      summaryRunning = !!payload.running;
+      renderStatus();
       break;
     case 'answer':
       state.answers.push(payload);
@@ -123,10 +126,16 @@ function showBanner(message, ms = 12000) {
 // ── 渲染 ────────────────────────────────────────────────────────
 function renderAll() { renderStatus(); renderTranscript(); renderPartial(); renderInsights(); renderAnswers(); }
 
+/**
+ * 狀態列的說法以「有沒有在聽聲音」為主，不再以字幕為主。
+ * 音訊才是逐字稿的來源，字幕只是拿來補說話者姓名 —— 所以「找不到字幕」
+ * 不再是錯誤，只是少了姓名而已，不該讓使用者以為壞掉了。
+ */
 function renderStatus() {
   const st = state.status || {};
   const dot = $('statusDot');
-  dot.className = 'dot' + (st.captionsFound ? ' live' : st.platform ? ' waiting' : '');
+  // 綠燈的條件是「正在聽聲音」，不是「有字幕」
+  dot.className = 'dot' + (st.audioFallback ? ' live' : st.platform ? ' waiting' : '');
   $('meetingTitle').textContent = state.meeting?.title || '尚未偵測到會議';
 
   const platformName = {
@@ -135,17 +144,19 @@ function renderStatus() {
     'jitsi': 'Jitsi Meet',
     'audio-fallback': '音訊備援',
   }[st.platform] || null;
+
   let msg;
-  if (!platformName) msg = '請開啟 Google Meet 或 Teams 會議分頁';
-  else if (st.captionsFound) msg = `${platformName} · 字幕已連線 · ${state.segments.length} 段`;
-  else msg = `${platformName} · 找不到字幕，請在會議中開啟字幕（CC）`;
-  if (!st.captionsFound && !st.audioFallback && settings?.sttAuto) {
-    msg += '；若這個會議沒有字幕，稍後會自動改用本機辨識';
+  if (!platformName) {
+    msg = '請開啟 Google Meet / Teams / Jitsi 會議分頁';
+  } else if (st.audioFallback) {
+    msg = `${platformName} · 聆聽中 · ${state.segments.length} 段`;
+    // 有字幕的話姓名才抓得到，這點值得講，但不是必要條件
+    msg += st.captionsFound ? ' · 字幕提供姓名' : '';
+  } else {
+    msg = `${platformName} · 正在啟動聆聽…`;
   }
-  if (st.audioFallback) msg += ' · 聽分頁聲音中';
+  if (summaryRunning) msg += ' · 產生摘要中';
   $('statusText').textContent = msg;
-  $('btnAudio').classList.toggle('on', !!st.audioFallback);
-  syncAutoMic();
   syncAutoStt();
 }
 
@@ -354,26 +365,11 @@ function patchAnswer(a) {
 // ── 動作 ────────────────────────────────────────────────────────
 $('search').addEventListener('input', renderTranscript);
 
-$('btnSummary').addEventListener('click', () => chrome.runtime.sendMessage({ type: 'ma:summarizeNow' }));
-
-$('btnAudio').addEventListener('click', async () => {
-  if (state.status?.audioFallback) {
-    await chrome.runtime.sendMessage({ type: 'ma:audio:stop' });
-    return;
-  }
-  // tabCapture 需要指定要擷取的分頁，側邊欄本身不是那個分頁
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab) { showBanner('找不到作用中的分頁。'); return; }
-  sttAutoBlocked = false;   // 手動按過就重新允許自動啟動
-  const res = await chrome.runtime.sendMessage({ type: 'ma:audio:start', tabId: tab.id });
-  if (res?.ok) showBanner(sttStartedMessage(res), 25000);
-});
-
 /**
  * 「開始聽聲音」之後要告訴使用者什麼。
  *
- * 三個引擎的延遲、費用、說話者標籤都不一樣，含糊帶過只會讓人以為壞了 ——
- * 尤其是延遲：本機辨識要等一整段講完才出字，不說清楚會被當成沒在動。
+ * 兩個引擎的延遲差很多，含糊帶過只會讓人以為壞了 —— 尤其是延遲：
+ * 本機辨識要等一整段講完才出字，不說清楚會被當成沒在動。
  */
 function sttStartedMessage(res) {
   const note = res.note ? `${res.note} ` : '';
@@ -397,7 +393,13 @@ $('btnExport').addEventListener('click', async () => {
   if (!res?.markdown) return;
   await navigator.clipboard.writeText(res.markdown);
   // 另存一份 .md：用 <a download> 而非 downloads API，省一個權限
-  const url = URL.createObjectURL(new Blob([res.markdown], { type: 'text/markdown' }));
+  //
+  // charset=utf-8 與 BOM 兩個都要。少了 charset，編輯器會用系統 ANSI（正體中文
+  // 機器是 Big5）解讀 UTF-8 位元組，整份中文變成亂碼；BOM 則是讓 Windows 的
+  // 記事本／Excel 這類不看 MIME 的程式也能認出是 UTF-8。實測沒加時匯出的
+  // 逐字稿全部是「æåä¸éµ」這種亂碼。
+  const blob = new Blob(['﻿', res.markdown], { type: 'text/markdown;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
   const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
   const a = document.createElement('a');
   a.href = url;
@@ -498,15 +500,6 @@ $('btnLocal').addEventListener('click', async () => {
   }
 });
 
-// ── 存檔給 Claude Code（畫面 + 逐字稿，用 Pro 訂閱的免費路線） ────
-$('btnSnapshot').addEventListener('click', async () => {
-  const res = await chrome.runtime.sendMessage({ type: 'ma:snapshot' });
-  if (!res?.ok) { showBanner(`存檔失敗：${res?.error || '未知錯誤'}`); return; }
-  showBanner(res.warning
-    ? res.warning
-    : `已存到下載資料夾的「${res.dir}」：${res.saved.join('、')}。到 Claude Code 說「看一下最新的會議畫面和逐字稿」就能用 Pro 額度分析。`);
-});
-
 // ── 顯示目前用哪個後端 ──────────────────────────────────────────
 // 本機模型能不能跑，只有側邊欄問得到（背景環境沒有 LanguageModel），
 // 所以偵測完要寫回設定，後端解析時才知道該不該改走 Claude Code。
@@ -545,161 +538,56 @@ async function refreshProviderBadge() {
 }
 refreshProviderBadge();
 
-// ── 設定：影響側邊欄自己要顯示什麼、要不要自動開麥克風 ──────────
+// ── 設定：影響側邊欄自己要顯示什麼 ─────────────────────────────
 async function loadSettings() {
   settings = await chrome.runtime.sendMessage({ type: 'ma:settings:get' });
   if (!settings) return;
   $('askScreen').checked = !!settings.captureScreen;
-  // 本機引擎不需要任何金鑰，所以這顆按鈕一律可用；只有標題會反映用哪個引擎
-  $('btnAudio').title = {
-    deepgram: '聽分頁聲音轉逐字稿（雲端 Deepgram，按量計費）',
-    whisper: '聽分頁聲音轉逐字稿（瀏覽器內建備援，免費但較慢、中文較差）',
-  }[settings.sttEngine] || '聽分頁聲音轉逐字稿（本機原生辨識，免費且完全離線，延遲約 18 秒）';
-  syncAutoMic();
   syncAutoStt();
 }
 loadSettings();
 
-// 狀態訊息只在內容有變化時才會送過來（內容腳本會去重），所以等待期結束
-// 這件事不能只靠狀態更新觸發 —— 自己定期複查。
-setInterval(() => { syncAutoMic(); syncAutoStt(); }, 5000);
-
-// ── 麥克風：用瀏覽器內建語音辨識抓「我自己」說的話 ──────────────
-// 免金鑰，但只聽得到麥克風，抓不到其他參與者（他們的聲音走字幕）。
-let recog = null;
-let micAutoBlocked = false;    // 自動啟動被權限擋過就不再重試，否則每次狀態更新都跳橫幅
-
-function stopMic() {
-  if (!recog) return;
-  const r = recog;
-  recog = null;                // 先清掉，onend 才不會自動續接
-  r.stop();
-  $('btnMic').classList.remove('on');
-}
-
-function startMic({ auto = false } = {}) {
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) { if (!auto) showBanner('這個瀏覽器不支援內建語音辨識。'); return; }
-  if (recog) return;
-
-  recog = new SR();
-  recog.lang = 'zh-TW';
-  recog.continuous = true;
-  recog.interimResults = true;
-  const sessionId = `mic-${Date.now().toString(36)}`;
-
-  recog.onresult = (e) => {
-    for (let i = e.resultIndex; i < e.results.length; i++) {
-      const r = e.results[i];
-      const text = r[0].transcript.trim();
-      if (!text) continue;
-      chrome.runtime.sendMessage({
-        type: 'ma:segment',
-        payload: {
-          id: `${sessionId}-${i}`, speaker: '我（麥克風）', text,
-          final: r.isFinal, ts: Date.now(), startedAt: Date.now(),
-          source: 'me', platform: state.status?.platform || 'mic',
-          sessionId: state.meeting?.sessionId || sessionId, title: state.meeting?.title || '麥克風',
-        },
-      });
-    }
-  };
-  recog.onerror = (e) => {
-    if (e.error === 'not-allowed') {
-      // 首次授權需要使用者手勢，自動啟動拿不到 —— 明確告訴他按一次就好，別再自動重試。
-      micAutoBlocked = true;
-      stopMic();
-      showBanner(auto
-        ? '要自動記錄你的發言，請先按一次「🎤 我的麥克風」授權麥克風，之後就會自動開啟。'
-        : '麥克風權限被拒。請在瀏覽器允許此擴充功能使用麥克風。', 20000);
-    } else if (e.error !== 'no-speech') {
-      showBanner(`語音辨識錯誤：${e.error}`);
-    }
-  };
-  recog.onend = () => { if (recog) recog.start(); };  // 長時間會自動斷線，自動續接
-  recog.start();
-  $('btnMic').classList.add('on');
-  if (auto) showBanner('抓不到字幕，已自動開啟麥克風記錄你自己的發言。其他人的發言仍需要字幕。');
-}
-
-$('btnMic').addEventListener('click', () => {
-  if (recog) { stopMic(); micAutoBlocked = true; return; }   // 手動關掉就別再自動開
-  micAutoBlocked = false;
-  startMic();
-});
+// 狀態訊息只在內容有變化時才會送過來（不會週期性重送），
+// 所以不能只靠它觸發 —— 自己定期複查。
+setInterval(() => { syncAutoStt(); }, 5000);
 
 /**
- * 抓不到字幕時自動開麥克風；字幕一恢復就關掉。
+ * 進到會議就開始聽分頁聲音，**不等字幕、也不因為字幕出現就停掉**。
  *
- * 不無條件開啟是刻意的：平台字幕本來就包含你自己的發言，而且帶真實姓名，
- * 兩邊都收會讓同一句話在逐字稿裡出現兩次，摘要也會看到重複內容。
- */
-/**
- * 「這個會議真的沒有字幕」的等待期。
+ * 這裡的預設在實測後整個反過來了。原本是「字幕優先，沒字幕才聽聲音」，
+ * 但真實會議裡 Meet 的字幕斷斷續續、常常抓不到（DOM 每幾個月改一次），
+ * 而本機 whisper.cpp 反而穩定得多：離線實測整段「這季的目標／結帳失敗率／
+ * 對帳／小陳」全部辨識正確。所以現在**音訊是主力，字幕只拿來校正說話者姓名**
+ * （姓名只有平台字幕才有，whisper 拿不到）。
  *
- * 不能一偵測到「沒字幕」就啟動備援：你剛進 Meet、還沒按下 CC 的那幾秒也符合
- * 這個條件。那樣會白燒 CPU 跑 Whisper，還會在逐字稿裡留下一批沒有姓名的段落。
- * 等 45 秒 —— 夠你把字幕打開，又不會讓真的沒字幕的會議等太久。
- */
-const NO_CAPTION_GRACE_MS = 45000;
-let noCaptionsSince = 0;
-
-/** 距離「確定沒有字幕」還要等多久；0 表示等待期已過 */
-function noCaptionWaitLeft() {
-  const st = state.status || {};
-  const inMeeting = !!st.platform && st.platform !== 'audio-fallback';
-  if (!inMeeting || st.captionsFound) { noCaptionsSince = 0; return Infinity; }
-  if (!noCaptionsSince) noCaptionsSince = Date.now();
-  return Math.max(0, NO_CAPTION_GRACE_MS - (Date.now() - noCaptionsSince));
-}
-
-function syncAutoMic() {
-  if (!settings?.micAuto) return;
-  const st = state.status || {};
-  if (st.captionsFound && recog) {
-    stopMic();
-    showBanner('字幕已連線，已關閉麥克風辨識，避免同一句話重複記錄。');
-    return;
-  }
-  if (noCaptionWaitLeft() > 0 || recog || micAutoBlocked) return;
-  startMic({ auto: true });
-}
-
-/**
- * 平台沒有字幕時自動開始聽分頁聲音（麥克風只聽得到你自己，其他人要靠這個）。
+ * 兩邊同時收不會產生重複：字幕的段落走 source='captions'，音訊走 source='audio'，
+ * store 只把音訊那條寫進逐字稿，字幕那條僅用於姓名比對。
  *
- * 只在**本機引擎**下自動啟動 —— 走雲端會按量計費，自動花錢是不能接受的。
- * 字幕一恢復就停掉，避免同一句話被記錄兩次。
+ * 只會啟動本機引擎 —— 這個專案不存在會計費的辨識路線。
  */
 let sttAutoBlocked = false;
 
 async function syncAutoStt() {
-  if (!settings?.sttAuto || settings.sttEngine === 'deepgram') return;
+  if (!settings?.sttAuto) return;
   const st = state.status || {};
 
-  if (st.captionsFound && st.audioFallback) {
-    await chrome.runtime.sendMessage({ type: 'ma:audio:stop' });
-    sttAutoBlocked = false;   // 字幕又消失時要能再自動接手
-    showBanner('字幕已連線，已停止聽分頁聲音，避免重複記錄。');
-    return;
-  }
+  // 已經在跑、或啟動失敗過就不再重試（避免每 5 秒跳同一個錯誤橫幅）
   if (st.audioFallback || sttAutoBlocked) return;
-  if (noCaptionWaitLeft() > 0) return;   // 還在等你按字幕按鈕
+
+  // 要先真的在一場會議裡。audio-fallback 是備援自己的 platform 標記，不算。
+  const inMeeting = !!st.platform && st.platform !== 'audio-fallback';
+  if (!inMeeting) return;
 
   sttAutoBlocked = true;   // 先擋住，避免狀態更新期間重複啟動
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab) return;
-  // 不指定 engine，讓背景照設定挑（原生優先、失敗自動退到 WASM）。
-  // 上面已經先擋掉 deepgram，所以這裡不會意外啟動要計費的那條。
   const res = await chrome.runtime.sendMessage({ type: 'ma:audio:start', tabId: tab.id });
   if (res?.ok) {
     // **不要**在這裡解除封鎖。狀態要等下一次 status 廣播才會變成 audioFallback=true，
     // 在那之前每 5 秒的複查會再進來一次，於是開出第二個擷取。
-    // 解除封鎖只發生在「使用者手動按了按鈕」或「字幕出現後又消失」。
-    showBanner(`這個會議沒有字幕，已自動開始聽分頁聲音。${sttStartedMessage(res)}`, 25000);
+    showBanner(`已開始聆聽會議聲音，逐字稿約 15 秒後開始出現。${sttStartedMessage(res)}`, 20000);
   } else {
     // 失敗通常是 tabCapture 需要先在會議分頁點過擴充功能圖示。
-    // 不解除封鎖，否則每次狀態更新都會再試一次、每次都跳同一個錯誤。
     showBanner(res?.error || '無法聽取分頁聲音。', 25000);
   }
 }

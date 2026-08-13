@@ -16,7 +16,8 @@
 
   emit('state', {
     meeting: { sessionId: 's1', platform: 'google-meet', title: '產品週會', url: 'https://meet.google.com/x', startedAt: now },
-    status: { captionsFound: true, platform: 'google-meet', audioFallback: false },
+    // 音訊優先：正常運作中的會議是「正在聽聲音」，字幕只是額外提供姓名
+    status: { captionsFound: true, platform: 'google-meet', audioFallback: true },
     segments: [
       { id: 'A', speaker: '王小明', text: '我們先看金流的部分', ts: now, source: 'captions' },
       { id: 'B', speaker: '李美華', text: '結帳失敗率上週是 2.3%', ts: now, source: 'captions' },
@@ -38,7 +39,7 @@
 
   // 逐字稿
   check('狀態列顯示會議標題', txt('#meetingTitle').includes('產品週會'), txt('#meetingTitle'));
-  check('狀態列顯示字幕已連線', txt('#statusText').includes('字幕已連線'), txt('#statusText'));
+  check('狀態列顯示正在聆聽', txt('#statusText').includes('聆聽中'), txt('#statusText'));
   check('狀態燈為 live', document.querySelector('#statusDot').className.includes('live'),
     document.querySelector('#statusDot').className);
   check('逐字稿渲染出三段', document.querySelectorAll('#transcript .seg').length === 3,
@@ -102,26 +103,27 @@
   check('錯誤橫幅顯示訊息', !document.querySelector('#banner').classList.contains('hidden')
     && txt('#banner').includes('API 金鑰無效'), txt('#banner'));
 
-  // 按鈕會送出對應訊息
-  document.querySelector('#btnSummary').click();
-  check('摘要按鈕送出 ma:summarizeNow',
-    window.__sent.some((m) => m.type === 'ma:summarizeNow'),
-    JSON.stringify(window.__sent));
-
-  // 狀態更新（音訊備援）
+  // 狀態列以「有沒有在聽聲音」為主，不再以字幕為主
   emit('status', { captionsFound: false, platform: 'google-meet', audioFallback: true });
-  check('音訊備援狀態反映在按鈕', document.querySelector('#btnAudio').classList.contains('on'));
-  check('沒有字幕時提示開啟字幕', txt('#statusText').includes('找不到字幕'), txt('#statusText'));
+  check('聆聽中時狀態列說「聆聽中」', txt('#statusText').includes('聆聽中'), txt('#statusText'));
+  check('聆聽中時狀態燈是綠的',
+    document.querySelector('#statusDot').classList.contains('live'));
+  check('沒字幕不再被當成錯誤（字幕只提供姓名）',
+    !txt('#statusText').includes('找不到字幕'), txt('#statusText'));
 
-  // 剛偵測到「沒字幕」時**不能**馬上啟動本機辨識：使用者可能只是還沒按 CC。
-  // 這是回歸測試 —— 原本的實作沒有等待期，會在 Meet 上白跑 Whisper。
+  // 有字幕時會註明姓名來源
+  emit('status', { captionsFound: true, platform: 'google-meet', audioFallback: true });
+  check('有字幕時說明它提供姓名', txt('#statusText').includes('姓名'), txt('#statusText'));
+
+  // 音訊優先：進到會議就該自動開始聽，**不等字幕**。
+  // 這是回歸測試 —— 舊版要等 45 秒確認「真的沒字幕」才啟動，
+  // 但實測 Meet 字幕斷斷續續，等它反而讓逐字稿一直是殘缺的。
+  window.__sent.length = 0;
   emit('status', { captionsFound: false, platform: 'google-meet', audioFallback: false });
   for (let i = 0; i < 10; i++) await tick();
-  check('剛進會議還沒開字幕時，不會立刻啟動本機辨識',
-    !window.__sent.some((m) => m.type === 'ma:audio:start'),
+  check('進到會議就自動開始聽聲音，不等字幕',
+    window.__sent.some((m) => m.type === 'ma:audio:start'),
     JSON.stringify(window.__sent.filter((m) => m.type === 'ma:audio:start')));
-  check('等待期間會提示稍後將自動改用本機辨識',
-    txt('#statusText').includes('自動改用本機辨識'), txt('#statusText'));
 
   // ── 免費模式的 UI ─────────────────────────────────────────────
   check('顯示「免費模式」徽章', txt('#providerBadge') === '免費模式', txt('#providerBadge'));
@@ -141,9 +143,10 @@
     localMsgs.some((m) => m.type === 'ma:local:done' && m.text === '這是本機模型的回答。'),
     JSON.stringify(localMsgs.filter((m) => m.type === 'ma:local:done')));
 
-  // 存檔給 Claude Code
-  document.querySelector('#btnSnapshot').click();
-  check('存檔按鈕送出 ma:snapshot', window.__sent.some((m) => m.type === 'ma:snapshot'));
+  // 介面刻意精簡：這些按鈕已經移除，因為它們代表的動作現在都自動發生
+  for (const id of ['btnSummary', 'btnAudio', 'btnMic', 'btnSnapshot']) {
+    check(`#${id} 已移除（動作改成自動）`, !document.querySelector(`#${id}`));
+  }
 
   const failed = results.filter((x) => x.startsWith('FAIL')).length;
   const pre = document.createElement('pre');
