@@ -565,29 +565,52 @@ setInterval(() => { syncAutoStt(); }, 5000);
  *
  * 只會啟動本機引擎 —— 這個專案不存在會計費的辨識路線。
  */
-let sttAutoBlocked = false;
+let sttStarting = false;      // 這一輪正在啟動，避免重複開擷取
+let sttRetryAt = 0;           // 失敗後要等到這個時間才重試
+
+/**
+ * 失敗後**要繼續重試**，不能一次失敗就永久放棄。
+ *
+ * 最常見的失敗是 tabCapture 要求「擴充功能已被該分頁叫用過」，也就是使用者
+ * 還沒在會議分頁點過工具列圖示 —— 那是他隨時會去做的動作，一放棄就等於
+ * 他點了也沒用，音訊整場都不會起來，逐字稿只剩斷斷續續的字幕。
+ * （這個 bug 真的發生過：實測那場會議的逐字稿只有三段，其中一段還是
+ * Meet 的「arrow_downward跳到底部」介面文字。）
+ *
+ * 用 15 秒退避而不是每 5 秒重試，避免權限沒給時洗版錯誤橫幅。
+ */
+const STT_RETRY_MS = 15000;
 
 async function syncAutoStt() {
   if (!settings?.sttAuto) return;
   const st = state.status || {};
 
-  // 已經在跑、或啟動失敗過就不再重試（避免每 5 秒跳同一個錯誤橫幅）
-  if (st.audioFallback || sttAutoBlocked) return;
+  if (st.audioFallback || sttStarting) return;
+  if (Date.now() < sttRetryAt) return;
 
   // 要先真的在一場會議裡。audio-fallback 是備援自己的 platform 標記，不算。
   const inMeeting = !!st.platform && st.platform !== 'audio-fallback';
   if (!inMeeting) return;
 
-  sttAutoBlocked = true;   // 先擋住，避免狀態更新期間重複啟動
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab) return;
-  const res = await chrome.runtime.sendMessage({ type: 'ma:audio:start', tabId: tab.id });
-  if (res?.ok) {
-    // **不要**在這裡解除封鎖。狀態要等下一次 status 廣播才會變成 audioFallback=true，
-    // 在那之前每 5 秒的複查會再進來一次，於是開出第二個擷取。
-    showBanner(`已開始聆聽會議聲音，逐字稿約 15 秒後開始出現。${sttStartedMessage(res)}`, 20000);
-  } else {
-    // 失敗通常是 tabCapture 需要先在會議分頁點過擴充功能圖示。
-    showBanner(res?.error || '無法聽取分頁聲音。', 25000);
+  sttStarting = true;
+  let started = false;
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab) { sttRetryAt = Date.now() + STT_RETRY_MS; return; }
+
+    const res = await chrome.runtime.sendMessage({ type: 'ma:audio:start', tabId: tab.id });
+    if (res?.ok) {
+      started = true;
+      showBanner(`已開始聆聽會議聲音，逐字稿約 15 秒後開始出現。${sttStartedMessage(res)}`, 20000);
+      return;
+    }
+
+    sttRetryAt = Date.now() + STT_RETRY_MS;
+    showBanner(res?.error || '無法聽取分頁聲音，15 秒後自動重試。', 12000);
+  } finally {
+    // 成功時**保持**擋住：狀態要等下一次 status 廣播才會變成 audioFallback=true，
+    // 在那之前的複查會再進來一次，於是開出第二個擷取。
+    // 失敗（或中途拋錯）才放開，否則永遠不會重試。
+    if (!started) sttStarting = false;
   }
 }

@@ -213,8 +213,30 @@ const SPEAKER_MATCH_MS = 20000;   // 本機辨識延遲約 15–18 秒，抓寬�
 function rememberCaptionSpeaker(seg) {
   const speaker = seg.speaker;
   if (!speaker || speaker === '未標註') return;
+  // 選擇器抓錯時「說話者」可能是介面文字，記進去會把它安到某段音訊頭上
+  if (looksLikeChrome(speaker)) return;
   recentCaptionSpeakers.push({ speaker, at: seg.startedAt || seg.ts || Date.now() });
   if (recentCaptionSpeakers.length > SPEAKER_MEMORY) recentCaptionSpeakers.shift();
+}
+
+/**
+ * 這段文字看起來是 Meet／Teams 的介面，不是有人講的話。
+ *
+ * 全部來自實測抓錯時真的進到逐字稿的內容：Material Icons 的連字名稱
+ * （`arrow_downward`、`arrow_drop_down` —— 圖示字型會把名稱當文字算進 textContent）、
+ * 鍵盤快速鍵提示、Gemini 橫幅、「會議記錄器」這類功能標籤。
+ */
+const CHROME_TEXT = [
+  /^[a-z_]+(跳到|展開|收合)/,              // arrow_downward跳到底部
+  /^(arrow_|keyboard_|more_|close$|expand_)/i,
+  /數位鍵盤|鍵盤快速鍵|按 Esc/,
+  /取用 Gemini|會議記錄器|字幕設定/,
+];
+
+function looksLikeChrome(text) {
+  const t = String(text || '').trim();
+  if (!t) return true;
+  return CHROME_TEXT.some((re) => re.test(t));
 }
 
 /** 找出這段音訊「說話當下」字幕記到的是誰；找不到就回傳 null */
@@ -244,12 +266,15 @@ async function onSegment(seg) {
   // 內容殘缺又重複；本機 whisper 反而完整得多。所以音訊是主要的逐字稿來源，
   // 字幕退成「誰在講話」的資料源 —— 各取所長，也不會同一句話記兩次。
   //
-  // 但**音訊沒在跑的時候字幕仍然要收**：tabCapture 需要使用者先在會議分頁點過
-  // 擴充功能圖示，這一步很容易漏掉。那種情況下丟掉字幕等於整個功能靜靜地失效，
-  // 有殘缺的逐字稿仍然勝過空白。
+  // 但**音訊還沒起來的那幾秒字幕仍然要收**，否則開頭會缺一段。
+  // 音訊一旦在跑，字幕就只提供姓名。
   if (seg.source === 'captions') {
     if (seg.final) rememberCaptionSpeaker(seg);
     if (store.getState().status?.audioFallback) return;
+    // 字幕當逐字稿用的時候要擋掉介面文字。選擇器失效時抓到的是 Meet 自己的
+    // UI（實測有「arrow_downward跳到底部」、鍵盤快速鍵提示、Gemini 橫幅），
+    // 那些混進逐字稿會一路汙染摘要與回答建議，而且使用者看不出是壞的。
+    if (looksLikeChrome(seg.text)) return;
   }
 
   // 本機辨識標的是「其他人（本機辨識）」這類佔位字串，能對上字幕就換成真名
@@ -621,15 +646,36 @@ async function startAudioFallback(tabId, engineOverride) {
     }
   }
 
-  let streamId;
+  let streamId = null;
+  let captureErr = null;
   try {
     streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
   } catch (err) {
+    captureErr = err;
     // Chrome 要求擴充功能「已被該分頁叫用過」才給音訊串流。
-    // 從側邊欄按鈕觸發時這個條件不一定成立，原始錯誤訊息看不出該怎麼辦。
-    const raw = String(err?.message || err);
+    //
+    // 這個條件比想像中難滿足：側邊欄用 openPanelOnActionClick 開啟時，
+    // Chrome 直接開面板、**onClicked 不會觸發**，所以點了圖示也不算「叫用過」。
+    // 使用者會覺得「我明明點了啊」，然後音訊整場都起不來。
+    //
+    // 補救：對那個分頁跑一段什麼都不做的 executeScript。我們對三個會議網域
+    // 都有靜態 host permission，所以這件事本來就做得到，而它會讓擴充功能
+    // 正式「被該分頁叫用過」—— 等於自己把授權補上，不必麻煩使用者。
+    if (chrome.scripting?.executeScript) {
+      try {
+        await chrome.scripting.executeScript({ target: { tabId }, func: () => {} });
+        streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
+        captureErr = null;
+      } catch {
+        // 補救失敗就保留原本的錯誤 —— 那個訊息才是使用者需要看到的
+      }
+    }
+  }
+
+  if (!streamId) {
+    const raw = String(captureErr?.message || captureErr || '未知錯誤');
     const message = /not been invoked|activeTab/i.test(raw)
-      ? '無法擷取分頁音訊：請先在「會議分頁」點一次工具列的擴充功能圖示，取得該分頁的授權，再按「音訊備援」。'
+      ? '無法擷取分頁音訊：請在「會議分頁」點一次工具列的擴充功能圖示，再重新整理該分頁。'
       : `無法擷取分頁音訊：${raw}`;
     // 上面可能已經把辨識伺服器拉起來了。這裡失敗就沒有東西會去停它，
     // 而 small 模型是常駐約 400 MB —— 這條路很容易走到（tabCapture 常因為
