@@ -5,9 +5,14 @@
 #
 # .bat 必須是 CRLF。cmd.exe 讀 LF-only 的批次檔會把指令 token 切錯，
 # 症狀是 powershell.exe 被拆成 powershell. 與 exe，Native Messaging 主機
-# 一啟動就死。在 macOS/Linux 上 clone（autocrlf=input）就會踩到，
-# 所以用 eol=crlf 強制，而不是依賴各人的 git 設定。
-*.bat text eol=crlf
+# 一啟動就死。
+#
+# 用 -text（完全不做換行轉換）而不是 text eol=crlf，差別很重要：
+# eol=crlf 是「repo 裡存 LF，checkout 時轉成 CRLF」，git clone 沒問題，
+# 但 GitHub 的「Download ZIP」直接送 repo 裡的 blob，不套用這個規則 ——
+# 下載 ZIP 的人會拿到 LF 版本，橋接就開不起來。
+# -text 讓 CRLF 原封不動存進 repo，clone 和 ZIP 兩條路都拿到正確的檔案。
+*.bat -text
 
 # .ps1 只在 Windows 上跑，一律 CRLF，順便避免混合換行。
 # （另一個地雷是 UTF-8 BOM —— git 不會動 BOM，但編輯器會，
