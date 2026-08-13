@@ -15,7 +15,14 @@ Microsoft Teams / Jitsi Meet 的會議字幕，產生逐字稿、滾動式摘要
 **整個從程式碼裡移除**，不只是預設關閉 —— 留著就有誤觸的可能：
 
 - 摘要走 **Claude Code 橋接**（Native Messaging 呼叫本機 `claude.exe`，用訂閱額度），
-  即時回答走 **Chrome 內建 Gemini Nano**（本機執行）。兩者都免費。
+  即時回答**也走 Claude Code**。兩者都免費。
+
+  > **Chrome 內建的 Gemini Nano 不支援中文輸出。** `LanguageModel.create()` 要求指定
+  > `outputLanguage`，而支援清單只有 `[en, es, ja]`（實測錯誤訊息列出 de/en/es/fr/ja）。
+  > 不指定會在 `chrome://extensions` 的錯誤頁一直累積警告，指定 `zh` 直接失敗。
+  > 這是個中文會議助手，回答要能照唸 —— 一個吐英文的模型在這裡沒有用，
+  > 所以 `fastAnswersLocal` 預設關閉，即時回答犧牲速度（10–30 秒）換可用的中文。
+  > 程式碼路徑留著，哪天 Nano 支援中文再打開就好。
 - 語音辨識用**本機 whisper.cpp**（small 模型）。Deepgram 那條已刪除。
 - `src/background/claude.js`（Claude API 用戶端）已刪除，`manifest.json` 也不再
   要求 `api.anthropic.com` 的權限。`resolveProvider()` 不可能回傳付費後端，

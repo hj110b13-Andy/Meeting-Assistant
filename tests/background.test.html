@@ -395,10 +395,20 @@ window.store = window.__module_store;
   delete SETTINGS.sttEngine;
   delete SETTINGS.schemaVersion;
 
-  // ══ 免費路線（本機模型）════════════════════════════════════
-  // 已經沒有付費後端了：即時回答一律走本機模型，推論委派給側邊欄
+  // ══ 預設：摘要與問答都走 Claude Code ═══════════════════════
+  // Chrome 內建的 Gemini Nano 不支援中文輸出（outputLanguage 只接受
+  // en/es/ja），對中文會議沒有用，所以預設不再走它。
+  const defaultInfo = await send({ type: 'ma:provider' });
+  check('預設即時回答走 Claude Code（Nano 不支援中文輸出）',
+    defaultInfo?.answerProvider === 'claude-code', JSON.stringify(defaultInfo?.answerProvider));
+  check('預設仍然完全免費', defaultInfo?.free === true);
+
+  // ══ 明確開啟時才走本機模型（例如主要開英文會議）════════════
+  // schemaVersion 要一起設，否則遷移會再跑一次把它改回 false
+  SETTINGS.fastAnswersLocal = true;
+  SETTINGS.schemaVersion = 4;
   const info = await send({ type: 'ma:provider' });
-  check('即時回答走免費的本機模型',
+  check('明確開啟後即時回答改走本機模型',
     info?.answerProvider === 'chrome-ai' && info.free === true, JSON.stringify(info));
   check('免費模型回報看不懂畫面', info?.supportsImages === false);
   check('免費模型需要側邊欄', info?.needsPanel === true && info.panelReachable === true);

@@ -27,9 +27,10 @@ export const DEFAULT_SETTINGS = {
 
   // ── 以下全部寫死，設定頁不顯示 ────────────────────────────
 
-  // 摘要走 Claude Code、問答走 Nano。見 resolveProvider。
+  // 摘要與問答都走 Claude Code。見 resolveProvider 的說明 ——
+  // Chrome 內建的 Gemini Nano 不支援中文輸出，對中文會議沒有用。
   provider: 'claude-code',
-  fastAnswersLocal: true,
+  fastAnswersLocal: false,
 
   // 摘要頻率：兩個條件都成立才觸發（AND）。
   // 5 分鐘而不是 1 分鐘：Claude Code 每次呼叫都是一個完整的 CLI session，
@@ -62,7 +63,7 @@ export const DEFAULT_SETTINGS = {
   localModelUnsupported: false,
 
   // 設定結構的版本。用來做一次性遷移（見 migrate）。
-  schemaVersion: 3,
+  schemaVersion: 4,
 };
 
 /**
@@ -75,6 +76,9 @@ export const DEFAULT_SETTINGS = {
  *   第 3 版：砍掉所有付費路線與後端選項。舊設定若停在 Claude API 或 Deepgram，
  *           一律拉回免費組合 —— 使用者的要求是「只花 Pro 訂閱的錢」，
  *           留著舊值會在他不知道的情況下繼續計費。
+ *   第 4 版：即時回答不再走 Chrome 內建模型（不支援中文輸出），改走 Claude Code。
+ *           舊設定存的是 fastAnswersLocal: true，不遷移的話會繼續用一個
+ *           吐不出中文的模型回答中文會議的問題。
  */
 function migrate(stored) {
   const out = { ...stored };
@@ -94,6 +98,10 @@ function migrate(stored) {
     delete out.effortAnswer;
     delete out.micAuto;
     out.schemaVersion = 3;
+  }
+  if (!(out.schemaVersion >= 4)) {
+    out.fastAnswersLocal = false;
+    out.schemaVersion = 4;
   }
   return out;
 }
@@ -123,21 +131,27 @@ export async function saveSettings(patch) {
 }
 
 /**
- * 實際要用哪個後端。分角色決定，因為兩件事對延遲的要求完全不同：
- *   summary — 可以慢，優先挑品質 → Claude Code
- *   answer  — 要秒級          → Gemini Nano
+ * 實際要用哪個後端。**兩者都免費**（Pro 訂閱額度／本機執行），
+ * 這個函式不可能回傳付費後端。
  *
- * 兩者都是免費的（Pro 訂閱額度／本機執行），這個函式不可能回傳付費後端。
+ * ## 為什麼摘要與問答都走 Claude Code
+ *
+ * 本來即時回答走 Chrome 內建的 Gemini Nano（1–3 秒，比 Claude Code 快得多）。
+ * 但**那顆模型不支援中文輸出** —— Chrome 的 `LanguageModel.create()` 要求指定
+ * `outputLanguage`，而支援清單只有 [en, es, ja]（實測錯誤訊息列出 de/en/es/fr/ja），
+ * 沒有 zh。不指定會在擴充功能的錯誤頁一直累積警告，指定 zh 直接失敗。
+ *
+ * 這是一個**中文會議助手**，回答建議要能直接照唸 —— 一個吐英文的模型
+ * 在這裡沒有用。所以即時回答也改走 Claude Code：慢（10–30 秒），
+ * 但至少是可用的中文。
+ *
+ * `fastAnswersLocal` 保留給「哪天 Nano 支援中文了」或使用者主要開英文會議的情況，
+ * 預設關閉。要打開的話直接改 storage。
  */
 export function resolveProvider(settings, role = 'summary') {
   const localOk = !settings.localModelUnsupported;
 
-  // 即時回答走本機模型（1–3 秒）；這台機器跑不動 Nano 就退回 Claude Code。
-  // 慢，但有東西可用勝過整個功能靜靜地失敗。
-  //
-  // fastAnswersLocal 預設開啟，設定頁不再顯示它。留著這個判斷是因為
-  // 「回答要快還是要準」是真的有取捨的：關掉之後回答改走 Claude Code，
-  // 品質好得多但每題要等 10–30 秒。需要時直接改 storage 就能切換。
-  if (role === 'answer' && localOk && settings.fastAnswersLocal !== false) return 'chrome-ai';
+  // 預設不再走 Nano（不支援中文輸出）。fastAnswersLocal 明確設成 true 才會用。
+  if (role === 'answer' && localOk && settings.fastAnswersLocal === true) return 'chrome-ai';
   return 'claude-code';
 }

@@ -446,7 +446,12 @@ async function ensureLocalModel(onProgress) {
   if (avail === 'unsupported' || avail === 'unavailable') {
     throw new Error('這個瀏覽器／裝置不支援 Chrome 內建模型。請改用 Claude API 或會後交給 Claude Code 摘要。');
   }
+  // **必須指定 outputLanguage，而且中文不在支援清單裡。**
+  // Chrome 目前只接受 [en, es, ja]（實測錯誤訊息列出 de/en/es/fr/ja），
+  // 沒指定會在擴充功能的錯誤頁留下警告，指定 'zh' 則直接失敗。
+  // 這台模型本來就沒有中文輸出能力 —— 見 handleLocalRun 的說明。
   localSession = await self.LanguageModel.create({
+    outputLanguage: 'en',
     monitor: (m) => m.addEventListener('downloadprogress', (e) => onProgress?.(e.loaded)),
   });
   localReady = true;
@@ -462,7 +467,7 @@ async function handleLocalRun({ id, system, user }) {
       if (avail !== 'available') {
         throw new Error('免費模型尚未啟用。請先按上方「啟用免費模型」完成一次性下載。');
       }
-      localSession = await self.LanguageModel.create();
+      localSession = await self.LanguageModel.create({ outputLanguage: 'en' });
       localReady = true;
     }
     // 每次用獨立分支，避免對話歷史累積把小小的 context 吃光。

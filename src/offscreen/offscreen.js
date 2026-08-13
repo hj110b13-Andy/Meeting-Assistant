@@ -185,10 +185,25 @@ function toWavBlob(samples, rate = TARGET_RATE) {
 function startChunker(src) {
   // ScriptProcessorNode 雖然已棄用，但這裡只做「複製 + 降取樣」，
   // 推論在 Worker 或另一個程序裡，主執行緒不會被卡住，實務上夠穩。
-  processor = audioCtx.createScriptProcessor(4096, 1, 1);
+  //
+  // **輸入宣告成 2 聲道，不是 1。** 分頁音訊通常是立體聲，宣告成單聲道時
+  // ScriptProcessorNode 的 channel 對應不保證是「混音後的結果」——
+  // 實測會拿到空的（全 0）緩衝，症狀是「聆聽中但永遠 0 段」。
+  // 自己把兩聲道相加平均，比依賴瀏覽器的降混行為可靠。
+  processor = audioCtx.createScriptProcessor(4096, 2, 1);
 
   processor.onaudioprocess = (e) => {
-    const down = downsample(e.inputBuffer.getChannelData(0), audioCtx.sampleRate);
+    const inBuf = e.inputBuffer;
+    const ch0 = inBuf.getChannelData(0);
+    let mono;
+    if (inBuf.numberOfChannels > 1) {
+      const ch1 = inBuf.getChannelData(1);
+      mono = new Float32Array(ch0.length);
+      for (let i = 0; i < ch0.length; i++) mono[i] = (ch0[i] + ch1[i]) / 2;
+    } else {
+      mono = ch0;
+    }
+    const down = downsample(mono, audioCtx.sampleRate);
     buf.push(down);
     bufLen += down.length;
     if (bufLen < chunkSec * TARGET_RATE) return;
