@@ -180,20 +180,66 @@ powershell -ExecutionPolicy Bypass -File tools\install-whisper.ps1
 
 要走按量計費的 Claude API 才需要填金鑰：設定頁 → Claude API → 填入後按「測試 API 連線」。
 
-### 換一台電腦
+### 換一台電腦：從 clone 到能用
 
-程式碼本身是可攜的，但有幾樣東西**綁在單一台機器上，不會跟著 git 走**，必須在新機器重跑：
+前提：**Windows**、已安裝並登入 **Claude Code**、有 **Chrome 或 Edge**。
 
-| 要做的事 | 為什麼不能共用 |
+```powershell
+git clone https://github.com/hj110b13-Andy/Meeting-Assistant.git
+cd Meeting-Assistant
+
+# ① 本機語音辨識（沒有字幕的會議才用得到，但建議先裝，約 260 MB）
+powershell -ExecutionPolicy Bypass -File tools\install-whisper.ps1
+```
+
+**② 載入擴充功能**：`chrome://extensions` → 右上角開啟「開發人員模式」→「載入未封裝項目」→ 選剛 clone 下來的資料夾 → **把卡片上顯示的擴充功能 ID 抄下來**。
+
+```powershell
+# ③ 註冊 Claude Code 橋接（摘要與問答要用；ID 就是上一步抄的）
+powershell -ExecutionPolicy Bypass -File bridge\install.ps1 -ExtensionId <剛抄的ID>
+```
+
+**④ 填兩個欄位**：側邊欄的 ⚙ → 「我的名字／稱呼」與「我的背景筆記」。名字空白的話自動回答幾乎不會觸發。
+
+順序不能顛倒：**③ 一定要在 ② 之後**，因為擴充功能 ID 要先載入才拿得到。
+
+#### 為什麼這幾步不能省
+
+| 東西 | 為什麼不跟著 git 走 |
 |---|---|
-| `tools\fetch-vendor.ps1` | `vendor/`（99 MB）沒有進版控 |
-| `bridge\install.ps1 -ExtensionId <新的ID>` | **擴充功能 ID 由資料夾路徑決定**，換一台就變了；註冊資訊寫在該台的登錄檔 |
-| `tools\install-whisper.ps1` | 原生辨識裝在該台的 `%LOCALAPPDATA%` |
-| 設定頁重填「我的名字」與「背景筆記」 | 設定存在該台瀏覽器的 `chrome.storage.local` |
+| `bridge/config.json`、`bridge/manifest.json` | 帶著該台電腦上 `claude.exe` 的絕對路徑與擴充功能 ID。**擴充功能 ID 由資料夾路徑決定**，換一台就變，所以只能各自產生 |
+| 原生語音辨識（約 260 MB） | 裝在該台的 `%LOCALAPPDATA%\MeetingAssistant\whisper`。**必須是純 ASCII 路徑**，見上方 whisper.cpp 的說明 |
+| `vendor/`（99 MB） | WASM 備援引擎，沒進版控。裝了原生的就用不到；真的要的話跑 `tools\fetch-vendor.ps1` |
+| 「我的名字」「背景筆記」等設定 | 存在該台瀏覽器的 `chrome.storage.local` |
 
-`bridge/config.json` 與 `bridge/manifest.json` 也不進版控 —— 它們帶著這台電腦上 `claude.exe` 的絕對路徑與擴充功能 ID，由 `install.ps1` 產生。
+沒裝任何語音引擎也不會壞 —— 只是遇到沒有字幕的會議時，「聽會議聲音」會失敗並在側邊欄說明原因。字幕、逐字稿、摘要、問答都不受影響。
 
 **作業系統限制**：擴充功能核心（字幕擷取、逐字稿、摘要、問答）跨平台；但**橋接與本機語音辨識目前只支援 Windows**，因為安裝腳本是 PowerShell、原生辨識用的是 Windows 版 whisper.cpp。macOS／Linux 上要走 Claude API 或 Chrome 內建模型。
+
+### 在另一台電腦上改這個專案
+
+改完要推回來的話，流程是：
+
+```powershell
+# 改之前先確認基準是綠的
+powershell -ExecutionPolicy Bypass -File tests\run.ps1
+powershell -ExecutionPolicy Bypass -File tests\check-project.ps1
+
+# ……改程式……
+
+# 改完兩個都要再跑一次，全綠才推
+powershell -ExecutionPolicy Bypass -File tests\run.ps1
+powershell -ExecutionPolicy Bypass -File tests\check-project.ps1
+
+git pull --rebase        # 先把另一台的變更接下來，避免分叉
+git add -A
+git commit -m "說明改了什麼、以及為什麼"
+git push
+```
+
+`check-project.ps1` 特別重要：它抓的是**測試跑得過、但擴充功能根本載不進去**的那類問題（少了 UTF-8 BOM、`.bat` 變成 LF、底線開頭的檔名、埠號對不上）。這些在 Windows 上很容易不小心引入，而症狀都不會指向真正的原因。
+
+專案的慣例與地雷寫在 **[`CLAUDE.md`](CLAUDE.md)** —— Claude Code 會自動讀那個檔案，所以在任何一台電腦上開始工作前不必特別交代。
 
 ## 使用
 
