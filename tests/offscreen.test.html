@@ -1,0 +1,173 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>會議助手 測試 — 音訊處理</title></head>
+<body>
+<pre id="out"></pre>
+
+<script>
+// offscreen.js 只在頂層註冊一個 onMessage listener，所以用 stub 載入是安全的。
+// 測的是裡面的純函式與佇列邏輯，不碰真的音訊裝置。
+const sent = [];
+window.chrome = {
+  runtime: {
+    onMessage: { addListener: () => {} },
+    sendMessage: (m) => { sent.push(m); },
+    getURL: (p) => p,
+    lastError: undefined,
+  },
+};
+</script>
+<!-- 順序要和 offscreen.html 一致：轉換表先載入，offscreen.js 才看得到 toTraditional -->
+<script src="s2t-table.js"></script>
+<script src="s2t.js"></script>
+<script src="offscreen.js"></script>
+
+<script>
+const results = [];
+const check = (name, cond, detail = '') =>
+  results.push(`${cond ? 'PASS' : 'FAIL'}  ${name}${cond ? '' : `  →  ${detail}`}`);
+
+(async () => {
+
+// ── stripOverlap：分段之間留 2 秒重疊，交界的話不能被記錄兩次 ─────
+check('切掉與上一段重疊的開頭',
+  stripOverlap('我們先看金流的部分，失敗率是', '失敗率是百分之三') === '百分之三',
+  stripOverlap('我們先看金流的部分，失敗率是', '失敗率是百分之三'));
+
+check('完全不重疊時原樣保留',
+  stripOverlap('我們先看金流的部分', '那預算呢') === '那預算呢');
+
+check('沒有上一段時原樣保留',
+  stripOverlap('', '第一段話') === '第一段話');
+
+check('空的新段落不會爆',
+  stripOverlap('前一段', '') === '');
+
+// 太短的相同片段不該被當成重疊 —— 中文兩三個字重複很常見
+check('只有兩個字相同時不算重疊',
+  stripOverlap('這樣就可以了', '了解，我來處理') === '了解，我來處理',
+  stripOverlap('這樣就可以了', '了解，我來處理'));
+
+check('整段都是重複時會被清空',
+  stripOverlap('失敗率是百分之三', '失敗率是百分之三') === '',
+  `「${stripOverlap('失敗率是百分之三', '失敗率是百分之三')}」`);
+
+// ── rms：Whisper 對靜音會產生幻覺文字，必須先擋掉 ────────────────
+const silence = new Float32Array(16000);                       // 全 0
+const speech = Float32Array.from({ length: 16000 }, (_, i) => Math.sin(i / 8) * 0.3);
+check('靜音的 RMS 低於門檻', rms(silence) < 0.004, String(rms(silence)));
+check('有聲音的 RMS 高於門檻', rms(speech) > 0.004, String(rms(speech)));
+
+// ── downsample：分頁音訊是 48kHz，模型要 16kHz ──────────────────
+const src48 = Float32Array.from({ length: 4800 }, (_, i) => i / 4800);
+const out16 = downsample(src48, 48000);
+check('降取樣後長度是三分之一', out16.length === 1600, String(out16.length));
+check('降取樣保留了訊號的形狀',
+  Math.abs(out16[0] - 0) < 0.01 && Math.abs(out16[out16.length - 1] - 1) < 0.01,
+  `${out16[0]} … ${out16[out16.length - 1]}`);
+check('取樣率相同時不做處理', downsample(src48, 16000).length === src48.length);
+
+// ── isNoiseOnly：whisper 對靜音／音樂會吐括號標記，不該進逐字稿 ──
+check('[BLANK_AUDIO] 被視為雜訊', isNoiseOnly('[BLANK_AUDIO]'));
+check('（音樂）被視為雜訊', isNoiseOnly('（音樂）'));
+check('【掌聲】被視為雜訊', isNoiseOnly('  【掌聲】 '));
+check('句中有括號的正常句子不算雜訊', isNoiseOnly('失敗率（不含退款）是三成') === false);
+check('正常句子不算雜訊', isNoiseOnly('那我們下週再看') === false);
+
+// ── toWavBlob：whisper-server 收的是 WAV 檔，不是原始樣本 ────────
+const wav = toWavBlob(new Float32Array([0, 0.5, -0.5, 1, -1]), 16000);
+const bytes = new DataView(await wav.arrayBuffer());
+const tag = (at) => String.fromCharCode(bytes.getUint8(at), bytes.getUint8(at + 1), bytes.getUint8(at + 2), bytes.getUint8(at + 3));
+check('WAV 大小是 44 位元組表頭加 16-bit 樣本', wav.size === 44 + 5 * 2, String(wav.size));
+check('RIFF/WAVE/fmt/data 四個標記都在', tag(0) === 'RIFF' && tag(8) === 'WAVE' && tag(12) === 'fmt ' && tag(36) === 'data',
+  `${tag(0)}/${tag(8)}/${tag(12)}/${tag(36)}`);
+check('宣告成 16kHz 單聲道 16-bit PCM',
+  bytes.getUint16(20, true) === 1 && bytes.getUint16(22, true) === 1
+  && bytes.getUint32(24, true) === 16000 && bytes.getUint16(34, true) === 16,
+  `fmt=${bytes.getUint16(20, true)} ch=${bytes.getUint16(22, true)} rate=${bytes.getUint32(24, true)} bits=${bytes.getUint16(34, true)}`);
+check('樣本被夾在 int16 範圍內（±1 不會溢位）',
+  bytes.getInt16(44 + 6, true) === 32767 && bytes.getInt16(44 + 8, true) === -32768,
+  `${bytes.getInt16(44 + 6, true)} / ${bytes.getInt16(44 + 8, true)}`);
+
+// ── handleResult：簡體結果要轉成繁體才進逐字稿 ───────────────────
+sent.length = 0;
+lastResultText = '';
+toTraditionalOn = true;
+handleResult('我先讲一下这季的目标，结账失败率要压到百分之一以下。', 1700000000000);
+const seg = sent.find((m) => m.type === 'ma:segment')?.payload;
+check('辨識結果會轉成繁體（台灣用字）',
+  seg?.text === '我先講一下這季的目標，結帳失敗率要壓到百分之一以下。', seg?.text);
+check('說話時間用的是傳入的 startedAt，不是現在',
+  seg?.startedAt === 1700000000000, String(seg?.startedAt));
+check('說話者標成本機辨識', seg?.speaker === '其他人（本機辨識）', seg?.speaker);
+
+sent.length = 0;
+lastResultText = '';
+toTraditionalOn = false;
+handleResult('这季的目标', 1);
+check('關掉繁體轉換時原樣送出',
+  sent.find((m) => m.type === 'ma:segment')?.payload.text === '这季的目标',
+  sent.find((m) => m.type === 'ma:segment')?.payload.text);
+
+sent.length = 0;
+lastResultText = '';
+handleResult('[BLANK_AUDIO]', 1);
+check('純雜訊的結果不會產生逐字稿段落',
+  sent.some((m) => m.type === 'ma:segment') === false);
+
+// ── 跟不上的處置：丟最舊的，並自動把分段拉長 ─────────────────────
+// transcribe 是 null，所以 pump 什麼都不做，佇列只會累積 —— 正好用來測丟棄邏輯。
+sent.length = 0;
+pending = [];
+dropped = 0;
+chunkSec = 12;
+transcribe = null;
+for (let i = 0; i < 4; i++) enqueue(new Float32Array(10), 1000 + i);
+check('積壓時只留最新的一段', pending.length === 1, `佇列 ${pending.length} 段`);
+check('丟掉的段數有記錄', dropped === 3, String(dropped));
+check('連續落後三次就把分段拉長 4 秒', chunkSec === 16, String(chunkSec));
+check('拉長分段時有明確告知使用者',
+  sent.some((m) => m.type === 'ma:audioNote' && m.message.includes('16 秒')),
+  JSON.stringify(sent.filter((m) => m.type === 'ma:audioNote').map((m) => m.message)));
+check('第一次落後就回報錯誤橫幅',
+  sent.filter((m) => m.type === 'ma:audioError').length === 1,
+  `${sent.filter((m) => m.type === 'ma:audioError').length} 次`);
+
+// 拉長是有上限的：超過 whisper 的 30 秒窗反而要多跑一輪編碼器
+chunkSec = 30;
+dropped = 0;
+sent.length = 0;
+for (let i = 0; i < 4; i++) enqueue(new Float32Array(10), 2000 + i);
+check('分段長度不會超過 30 秒', chunkSec === 30, String(chunkSec));
+
+// ── nativeTranscribe：走 HTTP 到 127.0.0.1 的原生引擎 ───────────
+let lastRequest = null;
+window.fetch = async (url, opts) => {
+  lastRequest = { url, opts };
+  return { ok: true, status: 200, json: async () => ({ text: ' 这是原生结果 ' }) };
+};
+nativeEndpoint = 'http://127.0.0.1:8317/inference';
+chunkSec = 12;
+const nativeText = await nativeTranscribe(new Float32Array(160));
+check('原生引擎打的是本機 127.0.0.1 的 /inference',
+  lastRequest?.url === 'http://127.0.0.1:8317/inference', String(lastRequest?.url));
+check('用 POST 送出', lastRequest?.opts?.method === 'POST', String(lastRequest?.opts?.method));
+check('音訊以 multipart 表單的 file 欄位送出',
+  lastRequest?.opts?.body instanceof FormData && lastRequest.opts.body.get('file') instanceof Blob);
+check('要求 json 格式的回應', lastRequest?.opts?.body?.get('response_format') === 'json');
+check('原生結果原樣回傳（繁體轉換在 handleResult 才做）',
+  nativeText === ' 这是原生结果 ', `「${nativeText}」`);
+
+window.fetch = async () => ({ ok: false, status: 503, json: async () => ({}) });
+let threw = '';
+try { await nativeTranscribe(new Float32Array(160)); } catch (e) { threw = e.message; }
+check('伺服器回非 200 時丟出可讀的錯誤', threw.includes('503'), threw);
+
+// ── 收尾 ────────────────────────────────────────────────────────
+const failed = results.filter((r) => r.startsWith('FAIL')).length;
+results.push('---');
+results.push(failed === 0 ? `全部 ${results.length - 1} 項通過` : `${failed} 項失敗`);
+document.getElementById('out').textContent = results.join('\n');
+
+})();
+</script>
+</body></html>

@@ -1,0 +1,81 @@
+{
+  "manifest_version": 3,
+  "name": "會議助手 — 即時逐字稿與重點",
+  "version": "0.1.0",
+  "description": "讀取瀏覽器中 Google Meet / Teams / Jitsi Meet 會議的即時字幕，產生帶說話者標註的逐字稿、滾動式重點摘要，並在你被提問時即時給出回答建議。",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "storage",
+    "sidePanel",
+    "tabs",
+    "activeTab",
+    "tabCapture",
+    "offscreen",
+    "downloads",
+    "nativeMessaging",
+    "clipboardWrite",
+    "scripting"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:8317/*",
+    "https://api.anthropic.com/*",
+    "https://meet.google.com/*",
+    "https://teams.microsoft.com/*",
+    "https://teams.live.com/*",
+    "https://meet.jit.si/*",
+    "https://*.8x8.vc/*"
+  ],
+  "optional_host_permissions": [
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "src/background/service-worker.js",
+    "type": "module"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
+  "action": {
+    "default_title": "開啟會議助手側邊欄",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "side_panel": {
+    "default_path": "src/sidepanel/panel.html"
+  },
+  "options_page": "src/options/options.html",
+  "content_scripts": [
+    {
+      "matches": ["https://meet.google.com/*"],
+      "js": ["src/content/core.js", "src/content/meet.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    },
+    {
+      "matches": [
+        "https://teams.microsoft.com/*",
+        "https://teams.live.com/*"
+      ],
+      "js": ["src/content/core.js", "src/content/teams.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    },
+    {
+      "matches": [
+        "https://meet.jit.si/*",
+        "https://*.8x8.vc/*"
+      ],
+      "js": ["src/content/core.js", "src/content/jitsi.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

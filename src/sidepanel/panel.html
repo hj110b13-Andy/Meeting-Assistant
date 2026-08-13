@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <title>會議助手</title>
+  <link rel="stylesheet" href="panel.css">
+</head>
+<body>
+  <header>
+    <div class="row">
+      <span id="statusDot" class="dot" title="字幕狀態"></span>
+      <div class="titles">
+        <strong id="meetingTitle">尚未偵測到會議</strong>
+        <small id="statusText">請開啟 Google Meet 或 Teams 會議並啟用字幕</small>
+      </div>
+      <span id="providerBadge" class="pill" title="目前使用的模型後端"></span>
+    </div>
+    <div class="row tools">
+      <button id="btnLocal" class="ghost hidden" title="下載並啟用 Chrome 內建模型，完全免費且離線執行">⚡ 啟用免費模型</button>
+      <button id="btnSnapshot" class="ghost" title="把會議畫面截圖與逐字稿存到下載資料夾，之後用 Claude Code（Pro 額度）分析">📸 存檔給 Claude Code</button>
+      <button id="btnMic" class="ghost" title="用麥克風辨識我自己說的話（瀏覽器內建，免金鑰）">🎤 我的麥克風</button>
+      <button id="btnAudio" class="ghost" title="沒有字幕時，聽分頁的聲音轉成逐字稿。預設用本機模型，免費且不外流">🔊 聽會議聲音</button>
+      <button id="btnSummary" class="ghost" title="立即重新產生摘要">↻ 摘要</button>
+      <button id="btnExport" class="ghost" title="複製 Markdown 逐字稿">⬇ 匯出</button>
+      <button id="btnClear" class="ghost danger" title="清除本場逐字稿">✕ 清除</button>
+      <button id="btnOptions" class="ghost" title="設定">⚙</button>
+    </div>
+    <div id="banner" class="banner hidden"></div>
+  </header>
+
+  <nav class="tabs">
+    <button data-tab="transcript" class="active">逐字稿</button>
+    <button data-tab="insights">重點 <span id="badgeInsights" class="badge hidden"></span></button>
+    <button data-tab="qa">問答 <span id="badgeQa" class="badge hidden"></span></button>
+  </nav>
+
+  <main>
+    <section id="tab-transcript" class="tab active">
+      <div class="filterbar">
+        <input id="search" type="search" placeholder="搜尋逐字稿…">
+        <label class="check"><input id="autoscroll" type="checkbox" checked> 自動捲動</label>
+      </div>
+      <div id="transcript" class="scroll"></div>
+      <div id="partial" class="partial hidden"></div>
+    </section>
+
+    <section id="tab-insights" class="tab">
+      <div id="insights" class="scroll">
+        <p class="empty">會議開始後，這裡會每隔一段時間自動更新重點、決議與待辦。</p>
+      </div>
+    </section>
+
+    <section id="tab-qa" class="tab">
+      <div class="askbar">
+        <textarea id="askInput" rows="2" placeholder="輸入問題，依目前逐字稿回答（Enter 送出，Shift+Enter 換行）"></textarea>
+        <button id="btnAsk">問</button>
+      </div>
+      <label class="check askopt" id="askScreenRow" title="截圖目前的會議畫面一起送去分析。會多花 10–20 秒，也多耗一次 Pro 額度。">
+        <input id="askScreen" type="checkbox"> 附上會議畫面（看得懂共享的圖表）
+      </label>
+      <div id="answers" class="scroll">
+        <p class="empty">當有人點名問你、或你手動提問時，這裡會出現可直接照唸的回答建議。</p>
+      </div>
+    </section>
+  </main>
+
+  <script src="panel.js"></script>
+</body>
+</html>

@@ -1,0 +1,23 @@
+# ── 機器專屬，由 bridge\install.ps1 產生 ────────────────────────
+# config.json 帶著這台電腦上 claude.exe 的絕對路徑；
+# manifest.json 帶著這台電腦上的擴充功能 ID（ID 由資料夾路徑決定，換一台就不同）。
+# 兩個都必須在每台電腦各自重新產生，不能共用。
+bridge/config.json
+bridge/manifest.json
+
+# ── 下載得到的大檔，不進版控 ───────────────────────────────────
+# vendor/ 是 WASM 備援引擎的模型與執行檔，約 99 MB，其中單檔 51 MB。
+# 用 tools\fetch-vendor.ps1 下載。
+vendor/
+
+# OpenCC 原始字典的快取（約 1 MB）。tools\gen-s2t.ps1 會自己重新下載；
+# 產生出來的 src/lib/s2t-table.js 有進版控，所以一般使用者不需要這份。
+tools/.opencc/
+
+# ── 執行時產生 ─────────────────────────────────────────────────
+tests/.tmp/
+
+# ── 平台雜物 ───────────────────────────────────────────────────
+Thumbs.db
+desktop.ini
+.DS_Store

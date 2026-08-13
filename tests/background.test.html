@@ -1,0 +1,531 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>背景邏輯測試</title></head>
+<body><pre id="out">（尚未執行）</pre>
+<script>
+// 測試頁自己掛掉時要看得到原因，否則 runner 只會看到「尚未執行」
+addEventListener('error', (e) => {
+  document.getElementById('out').textContent = `FAIL  測試頁拋出錯誤  →  ${e.message} @ ${e.filename}:${e.lineno}`;
+});
+addEventListener('unhandledrejection', (e) => {
+  document.getElementById('out').textContent =
+    `FAIL  測試頁有未處理的 rejection  →  ${e.reason?.stack || e.reason}`;
+});
+</script>
+<script>
+// ── 設定與 chrome stub ─────────────────────────────────────────
+const SETTINGS = {
+  apiKey: 'sk-ant-test', model: 'claude-sonnet-5',
+  effortSummary: 'medium', effortAnswer: 'low',
+  myNames: '小陳, Ken', notes: '我負責金流後端。',
+  // summaryDue 是 AND：段數與時間都要成立。這裡把最短間隔設 0，
+  // 讓時間條件永遠滿足，測試才能只用段數門檻驅動摘要。
+  summaryEverySegments: 3, summaryEveryMs: 0,
+  autoAnswer: true, deepgramKey: '',
+};
+window.__broadcasts = [];
+window.__fetches = [];
+window.__sentToRuntime = [];
+let onConnectHandler = null, onMessageHandler = null;
+
+window.chrome = {
+  runtime: {
+    lastError: undefined,
+    onInstalled: { addListener: () => {} },
+    onStartup: { addListener: () => {} },
+    onConnect: { addListener: (fn) => { onConnectHandler = fn; } },
+    onMessage: { addListener: (fn) => { onMessageHandler = fn; } },
+    // 記錄下來，才能驗證送去 offscreen 的引擎與模型是對的
+    sendMessage: async (m) => { window.__sentToRuntime.push(m); return { ok: true }; },
+  },
+  action: { onClicked: { addListener: () => {} } },
+  sidePanel: { setPanelBehavior: async () => {}, open: async () => {} },
+  storage: { local: { get: async (k) => (k === 'settings' ? { settings: SETTINGS } : {}), set: async () => {} } },
+  offscreen: { hasDocument: async () => false, createDocument: async () => {}, closeDocument: async () => {} },
+  tabCapture: { getMediaStreamId: async () => 'stream-id' },
+  tabs: {
+    query: async () => [{ id: 1, windowId: 7 }],
+    captureVisibleTab: async () => 'data:image/png;base64,iVBORw0KGgo=',
+  },
+  // 截圖要交給 Claude Code 讀檔，所以下載完成後還要查得到絕對路徑
+  downloads: {
+    download: async (opts) => { window.__downloads.push(opts); return 99; },
+    search: async () => [{ id: 99, state: 'complete', filename: 'C:\\Users\\test\\Downloads\\會議助手\\提問畫面-x.png' }],
+  },
+};
+window.__downloads = [];
+
+// Native Messaging stub：模擬 bridge\host.ps1
+//
+// 現在有兩個模組各自 connectNative（claudecode.js 走 Claude Code，
+// whisper-native.js 管本機辨識伺服器），Chrome 會為每條連線各開一個主機程序，
+// 所以 stub 也要能同時存在多條。replyAll 廣播給所有連線 —— 回應是靠 id 配對的，
+// 送錯連線的訊息會被忽略，所以廣播是安全的。
+window.__native = { posted: [], ports: [], port: null, failStt: false };
+window.chrome.runtime.connectNative = () => {
+  const port = {
+    listeners: [],
+    onMessage: { addListener: (fn) => port.listeners.push(fn) },
+    onDisconnect: { addListener: () => {} },
+    disconnect: () => {},
+    // 會自己回覆的訊息型別必須在這裡處理完，否則呼叫端會等它的逾時，
+    // 而測試用的是微任務時鐘，setTimeout 永遠不會走到 —— 整個流程就卡住了。
+    postMessage: (m) => {
+      window.__native.posted.push(m);
+      const auto = (r) => Promise.resolve().then(() => port.reply({ id: m.id, ...r }));
+      if (m.type === 'ping') auto({ ok: true, text: 'pong' });
+      else if (m.type === 'sttStatus') {
+        auto({ ok: true, installed: true, running: false, dir: 'C:\\x\\whisper', models: ['ggml-small-q5_1.bin'], port: 8317 });
+      } else if (m.type === 'sttStart') {
+        auto(window.__native.failStt
+          ? { ok: false, error: '找不到本機辨識程式。請先執行 tools\\install-whisper.ps1。' }
+          : { ok: true, reused: false, model: 'ggml-small-q5_1.bin', startMs: 6000, port: 8317 });
+      } else if (m.type === 'sttStop') auto({ ok: true });
+    },
+    reply: (msg) => port.listeners.forEach((fn) => fn(msg)),
+  };
+  window.__native.ports.push(port);
+  window.__native.port = port;
+  return port;
+};
+window.__native.replyAll = (msg) => window.__native.ports.forEach((p) => p.reply(msg));
+
+// ── fetch stub：依 body 判斷是串流問答還是非串流摘要 ──────────────
+const SUMMARY_JSON = JSON.stringify({
+  topics: ['金流'], summary: ['討論結帳失敗率'], decisions: [],
+  actions: [{ owner: '小陳', task: '追 API' }], open_questions: [],
+});
+window.__nextStatus = 200;
+window.fetch = async (url, opts) => {
+  const body = JSON.parse(opts.body);
+  window.__fetches.push({ url, headers: opts.headers, body });
+
+  if (window.__nextStatus !== 200) {
+    const status = window.__nextStatus;
+    window.__nextStatus = 200;
+    return { ok: false, status, json: async () => ({ error: { message: '測試錯誤' } }) };
+  }
+
+  if (!body.stream) {
+    return { ok: true, status: 200, json: async () => ({
+      content: [{ type: 'text', text: SUMMARY_JSON }], usage: {}, stop_reason: 'end_turn', model: body.model,
+    }) };
+  }
+
+  // SSE：故意把一個事件切在 chunk 邊界上，驗證緩衝處理
+  const parts = [
+    'event: message_start\ndata: {"type":"message_start"}\n\n',
+    'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"對帳 API "}}\n\n',
+    'event: content_block_delta\ndata: {"type":"content_block_del',
+    'ta","delta":{"type":"text_delta","text":"預計 8/20 開通。"}}\n\n',
+    'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n\n',
+  ];
+  const enc = new TextEncoder();
+  let i = 0;
+  return { ok: true, status: 200, body: { getReader: () => ({
+    read: async () => (i < parts.length ? { done: false, value: enc.encode(parts[i++]) } : { done: true }),
+  }) } };
+};
+</script>
+
+<script src="store.test.js"></script>
+<script>
+// service-worker.js 用 `import * as store`。__module_store 由 run.ps1 的轉換器
+// 從實際的匯出自動產生，所以新增匯出時不必回來手動補（以前漏過）。
+window.store = window.__module_store;
+</script>
+<script src="settings.test.js"></script>
+<script src="claude.test.js"></script>
+<script src="localmodel.test.js"></script>
+<script src="claudecode.test.js"></script>
+<script src="provider.test.js"></script>
+<script src="whisper-native.test.js"></script>
+<script src="sw.test.js"></script>
+
+<script>
+(async () => {
+  const results = [];
+  const check = (n, c, e = '') => results.push(`${c ? 'PASS' : 'FAIL'}  ${n}${c ? '' : '  →  ' + e}`);
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+  try {
+
+  // 假的側邊欄連線，用來收 broadcast（並保留關閉它的方法）
+  let onPanelDisconnect = null;
+  onConnectHandler({
+    name: 'ma-panel',
+    postMessage: (m) => window.__broadcasts.push(m),
+    onDisconnect: { addListener: (fn) => { onPanelDisconnect = fn; } },
+  });
+  window.__closePanel = () => onPanelDisconnect?.();
+  const got = (type) => window.__broadcasts.filter((b) => b.type === type);
+
+  const send = (msg) => new Promise((resolve) => { onMessageHandler(msg, {}, resolve); });
+  const seg = (id, speaker, text) => ({
+    type: 'ma:segment',
+    payload: { id, speaker, text, final: true, ts: Date.now(), startedAt: Date.now(),
+      source: 'captions', platform: 'google-meet', sessionId: 'sess1', title: '週會', url: 'https://meet.google.com/x' },
+  });
+
+  check('註冊了 onConnect 與 onMessage', !!onConnectHandler && !!onMessageHandler);
+
+  // ── 一般陳述句不該觸發回答 ──────────────────────────────────
+  await send(seg('s1', '王小明', '我們先看金流的部分'));
+  await settle();
+  check('陳述句不觸發回答建議', got('answer').length === 0, `${got('answer').length} 則`);
+
+  // ── 沒點名我的問句也不該觸發 ────────────────────────────────
+  await send(seg('s2', '王小明', '這個數字是從哪來的？'));
+  await settle();
+  check('未點名的問句不觸發回答', got('answer').length === 0, `${got('answer').length} 則`);
+
+  // ── 點名我的問句要觸發，並串流回答 ──────────────────────────
+  await send(seg('s3', '李美華', '小陳，對帳 API 什麼時候會開通？'));
+  await settle(); await settle(); await settle();
+  check('點名我時觸發回答建議', got('answer').length === 1, `${got('answer').length} 則`);
+  const deltas = got('answerDelta').map((d) => d.payload.chunk).join('');
+  check('SSE 串流正確解析（含跨 chunk 事件）', deltas === '對帳 API 預計 8/20 開通。', JSON.stringify(deltas));
+  check('串流結束有送出 answerDone', got('answerDone').length === 1);
+
+  // ── 送去 Claude 的請求形狀 ──────────────────────────────────
+  const answerReq = window.__fetches.find((f) => f.body.stream);
+  check('請求帶了瀏覽器直連標頭',
+    answerReq?.headers['anthropic-dangerous-direct-browser-access'] === 'true',
+    JSON.stringify(answerReq?.headers));
+  check('請求帶了 anthropic-version', answerReq?.headers['anthropic-version'] === '2023-06-01');
+  check('回答用 claude-sonnet-5', answerReq?.body.model === 'claude-sonnet-5', answerReq?.body.model);
+  check('回答關閉思考以降低延遲', answerReq?.body.thinking?.type === 'disabled', JSON.stringify(answerReq?.body.thinking));
+  check('回答用 low effort', answerReq?.body.output_config?.effort === 'low', JSON.stringify(answerReq?.body.output_config));
+  check('沒有帶 Sonnet 5 會拒絕的取樣參數',
+    !('temperature' in answerReq.body) && !('top_p' in answerReq.body) && !('top_k' in answerReq.body),
+    Object.keys(answerReq.body).join(','));
+  check('system 最後一塊掛了 cache_control',
+    answerReq.body.system.at(-1).cache_control?.type === 'ephemeral',
+    JSON.stringify(answerReq.body.system.at(-1).cache_control));
+  check('提示詞含我的背景筆記', JSON.stringify(answerReq.body.system).includes('我負責金流後端'));
+  check('提示詞含近期逐字稿', JSON.stringify(answerReq.body.system).includes('我們先看金流的部分'));
+
+  // ── 摘要：達到門檻自動觸發 ──────────────────────────────────
+  const summaryReq = window.__fetches.find((f) => !f.body.stream);
+  check('累積到門檻自動產生摘要', !!summaryReq, `已發出 ${window.__fetches.length} 次請求`);
+  check('摘要用結構化輸出', summaryReq?.body.output_config?.format?.type === 'json_schema',
+    JSON.stringify(summaryReq?.body.output_config?.format?.type));
+  check('摘要 schema 禁止額外欄位', summaryReq?.body.output_config?.format?.schema?.additionalProperties === false);
+  check('摘要用 adaptive thinking', summaryReq?.body.thinking?.type === 'adaptive');
+  check('摘要結果已存入 store', store.getState().summary?.summary[0] === '討論結帳失敗率',
+    JSON.stringify(store.getState().summary?.summary));
+  check('摘要結果已廣播到側邊欄', got('summary').length >= 1);
+
+  // ── 手動提問 ────────────────────────────────────────────────
+  const before = got('answer').length;
+  await send({ type: 'ma:ask', question: '預算還剩多少？' });
+  await settle(); await settle(); await settle();
+  check('手動提問也會產生回答', got('answer').length === before + 1);
+
+  // ── API 錯誤要變成看得懂的中文 ──────────────────────────────
+  window.__nextStatus = 401;
+  await send({ type: 'ma:summarizeNow' });
+  await settle(); await settle();
+  const err = got('error').map((e) => e.payload.message).join(' | ');
+  check('401 轉成中文提示', err.includes('API 金鑰無效'), err || '沒有錯誤廣播');
+
+  // ── 匯出 ────────────────────────────────────────────────────
+  const exported = await send({ type: 'ma:export' });
+  check('匯出 Markdown 含逐字稿', exported?.markdown?.includes('我們先看金流的部分'));
+  check('匯出 Markdown 含待辦', exported?.markdown?.includes('追 API'));
+
+  // ── 聽會議聲音：沒金鑰時要走本機引擎，而不是拒絕 ──────────────
+  window.__sentToRuntime.length = 0;
+  const audio = await send({ type: 'ma:audio:start', tabId: 1 });
+  check('沒有金鑰時仍可用（自動走原生本機辨識）',
+    audio?.ok === true && audio.engine === 'whisper-native', JSON.stringify(audio));
+
+  const offStart = window.__sentToRuntime.find((m) => m.type === 'ma:offscreen:start');
+  check('送去 offscreen 的引擎是原生 whisper',
+    offStart?.engine === 'whisper-native', JSON.stringify(offStart?.engine));
+  check('把本機伺服器的網址交給 offscreen（音訊走 HTTP，不走 native messaging 的 1MB 上限）',
+    offStart?.options?.endpoint === 'http://127.0.0.1:8317/inference', JSON.stringify(offStart?.options));
+  check('原生引擎預設用 small 模型（中文準確度差距很大）',
+    offStart?.options?.model === 'small', JSON.stringify(offStart?.options?.model));
+  check('預設要求把結果轉成繁體', offStart?.options?.toTraditional === true);
+  check('本機引擎不需要金鑰就能啟動', !offStart?.deepgramKey);
+  check('有先請橋接把辨識伺服器拉起來',
+    window.__native.posted.some((m) => m.type === 'sttStart' && m.model === 'small'),
+    JSON.stringify(window.__native.posted.map((m) => m.type)));
+
+  await send({ type: 'ma:audio:stop' });
+  check('停止擷取時會把辨識伺服器收掉（small 模型約 400MB 記憶體）',
+    window.__native.posted.some((m) => m.type === 'sttStop'),
+    JSON.stringify(window.__native.posted.map((m) => m.type)));
+
+  // ── 原生引擎裝不起來 → 自動退到瀏覽器內建，而不是整個功能失敗 ──
+  window.__native.failStt = true;
+  window.__sentToRuntime.length = 0;
+  const notesBefore = got('audioNote').length;
+  const fallback = await send({ type: 'ma:audio:start', tabId: 1 });
+  check('原生辨識起不來時自動退到瀏覽器內建引擎',
+    fallback?.ok === true && fallback.engine === 'whisper', JSON.stringify(fallback));
+  const fbStart = window.__sentToRuntime.find((m) => m.type === 'ma:offscreen:start');
+  check('備援用內建的 whisper-base 模型',
+    fbStart?.options?.modelId === 'Xenova/whisper-base', JSON.stringify(fbStart?.options?.modelId));
+  check('有告知使用者換了引擎、以及怎麼裝回原生的',
+    got('audioNote').slice(notesBefore).some((n) => n.payload.message.includes('install-whisper')),
+    JSON.stringify(got('audioNote').slice(notesBefore).map((n) => n.payload.message)));
+  window.__native.failStt = false;
+  await send({ type: 'ma:audio:stop' });
+
+  // ── tabCapture 失敗時不能留下一台沒人管的辨識伺服器 ────────────
+  // 這條路很容易走到：Chrome 要求「該分頁叫用過擴充功能」才給音訊串流。
+  // 那時伺服器已經被拉起來了，如果沒收掉就等於白佔約 400 MB。
+  const realGetStreamId = window.chrome.tabCapture.getMediaStreamId;
+  window.chrome.tabCapture.getMediaStreamId = async () => {
+    throw new Error('Extension has not been invoked for the current page');
+  };
+  window.__native.posted.length = 0;
+  const denied = await send({ type: 'ma:audio:start', tabId: 1 });
+  check('tabCapture 被拒時給出可行動的說明',
+    denied?.ok === false && denied.error.includes('點一次工具列的擴充功能圖示'), JSON.stringify(denied));
+  check('tabCapture 被拒時會把已啟動的辨識伺服器收掉',
+    window.__native.posted.some((m) => m.type === 'sttStop'),
+    JSON.stringify(window.__native.posted.map((m) => m.type)));
+  window.chrome.tabCapture.getMediaStreamId = realGetStreamId;
+
+  // 明確要求雲端引擎但沒金鑰 → 才該拒絕，而且要說清楚可以改用本機
+  const cloud = await send({ type: 'ma:audio:start', tabId: 1, engine: 'deepgram' });
+  check('明確要求雲端但沒金鑰時拒絕，並指向本機引擎',
+    cloud?.ok === false && cloud.error.includes('本機'), JSON.stringify(cloud));
+
+  await send({ type: 'ma:audio:stop' });
+
+  // ── 設定頁的「檢查本機原生辨識」 ────────────────────────────
+  const sttInfo = await send({ type: 'ma:stt:status' });
+  check('查得到本機辨識的安裝狀態與模型清單',
+    sttInfo?.ok === true && sttInfo.installed === true && sttInfo.models.includes('ggml-small-q5_1.bin'),
+    JSON.stringify(sttInfo));
+
+  // ── 設定遷移：舊使用者停在 WASM 引擎上會不知道有更好的可用 ────
+  SETTINGS.sttEngine = 'whisper';
+  delete SETTINGS.schemaVersion;
+  const migrated = await getSettings();
+  check('舊設定裡的 WASM 引擎會遷移成原生引擎',
+    migrated.sttEngine === 'whisper-native', migrated.sttEngine);
+  SETTINGS.schemaVersion = 2;
+  const kept = await getSettings();
+  check('已遷移過之後就尊重使用者的選擇，不再改動',
+    kept.sttEngine === 'whisper', kept.sttEngine);
+  delete SETTINGS.sttEngine;
+  delete SETTINGS.schemaVersion;
+
+  // ══ 免費路線（Chrome 內建模型）══════════════════════════════
+  // 切成無金鑰：後端應自動落到免費模型，且推論要委派給側邊欄
+  SETTINGS.apiKey = '';
+  SETTINGS.provider = 'auto';
+
+  const info = await send({ type: 'ma:provider' });
+  check('無金鑰時自動切到免費模型', info?.provider === 'chrome-ai' && info.free === true, JSON.stringify(info));
+  check('免費模型回報看不懂畫面', info?.supportsImages === false);
+  check('免費模型需要側邊欄', info?.needsPanel === true && info.panelReachable === true);
+
+  const fetchesBefore = window.__fetches.length;
+  const askPromise = send({ type: 'ma:ask', question: '剛剛李美華問的問題怎麼回答？' });
+  await settle(); await settle();
+  const runs = got('localRun');
+  check('免費路線不呼叫任何 API', window.__fetches.length === fetchesBefore,
+    `多了 ${window.__fetches.length - fetchesBefore} 次請求`);
+  check('推論委派到側邊欄執行', runs.length === 1, `${runs.length} 次`);
+  check('委派內容含逐字稿與筆記',
+    runs[0]?.payload.system.includes('我負責金流後端') && runs[0]?.payload.system.includes('我們先看金流的部分'));
+  check('委派內容含問題本身', runs[0]?.payload.user.includes('剛剛李美華問的問題'), runs[0]?.payload.user);
+
+  // 模擬側邊欄把結果串流回來
+  const runId = runs[0].payload.id;
+  await send({ type: 'ma:local:delta', id: runId, chunk: '她問的是對帳 API，' });
+  await send({ type: 'ma:local:delta', id: runId, chunk: '回答預計 8/20 開通。' });
+  await send({ type: 'ma:local:done', id: runId, text: '她問的是對帳 API，回答預計 8/20 開通。' });
+  await askPromise; await settle();
+  const localAnswer = store.getState().answers.at(-1);
+  check('免費模型的回答有收回來並存好',
+    localAnswer?.answer === '她問的是對帳 API，回答預計 8/20 開通。', localAnswer?.answer);
+  check('免費模型的回答有廣播 answerDone', got('answerDone').length >= 2);
+
+  // ── 免費路線的摘要用純文字格式，不用 JSON schema ────────────
+  const runsBefore = got('localRun').length;
+  const sumPromise = send({ type: 'ma:summarizeNow' });
+  await settle(); await settle();
+  const sumRun = got('localRun')[runsBefore];
+  check('摘要也走免費模型', !!sumRun, `localRun 共 ${got('localRun').length} 次`);
+  check('免費摘要改用純文字格式指示', sumRun?.payload.system.includes('主題: 詞1, 詞2'),
+    (sumRun?.payload.system || '').slice(-120));
+  await send({ type: 'ma:local:done', id: sumRun.payload.id, text: [
+    '主題: 金流, 對帳',
+    '重點: 結帳失敗率上週 2.3%',
+    '決議: 先處理第三方對帳',
+    '待辦: 小陳|追 API 開通進度',
+    '問題: 對帳 API 何時開通',
+  ].join('\n') });
+  await sumPromise; await settle();
+  const sum = store.getState().summary;
+  check('純文字摘要解析出主題', JSON.stringify(sum?.topics) === '["金流","對帳"]', JSON.stringify(sum?.topics));
+  check('純文字摘要解析出重點', sum?.summary[0] === '結帳失敗率上週 2.3%', JSON.stringify(sum?.summary));
+  check('純文字摘要解析出負責人與事項',
+    sum?.actions[0]?.owner === '小陳' && sum?.actions[0]?.task === '追 API 開通進度',
+    JSON.stringify(sum?.actions));
+  check('純文字摘要解析出未解問題', sum?.open_questions[0] === '對帳 API 何時開通');
+
+  // ── 側邊欄關閉時，免費模型不該一直噴錯 ──────────────────────
+  window.__closePanel();
+  const errsBefore = got('error').length;
+  await send({ type: 'ma:summarizeNow' });
+  await settle(); await settle();
+  check('側邊欄關閉時安靜跳過摘要，不噴錯誤', got('error').length === errsBefore,
+    got('error').slice(errsBefore).map((e) => e.payload.message).join(' | '));
+
+  // ══ Claude Code 路線（用 Pro 訂閱額度，不按量計費）════════════
+  // 重開一個側邊欄連線（前一項測試把它關掉了）
+  onConnectHandler({
+    name: 'ma-panel',
+    postMessage: (m) => window.__broadcasts.push(m),
+    onDisconnect: { addListener: () => {} },
+  });
+  SETTINGS.provider = 'claude-code';
+  SETTINGS.fastAnswersLocal = true;
+
+  const ccInfo = await send({ type: 'ma:provider' });
+  check('摘要走 Claude Code', ccInfo?.provider === 'claude-code', JSON.stringify(ccInfo?.provider));
+  check('即時回答自動改走本機模型（Claude Code 太慢）',
+    ccInfo?.answerProvider === 'chrome-ai', JSON.stringify(ccInfo?.answerProvider));
+  check('兩者都免費', ccInfo?.free === true);
+  check('回報需要橋接', ccInfo?.needsBridge === true);
+
+  // 摘要應該送到 native 橋接，而不是打 API
+  const apiBefore = window.__fetches.length;
+  const ccSum = send({ type: 'ma:summarizeNow' });
+  await settle(); await settle();
+  const runMsg = window.__native.posted.find((m) => m.type === 'run');
+  check('摘要送到 Claude Code 橋接', !!runMsg,
+    `posted=${JSON.stringify(window.__native.posted)} 最近錯誤=${got('error').slice(-2).map((e) => e.payload.message).join(' ; ')}`);
+  if (!runMsg) throw new Error('橋接沒收到請求，後續測試無法進行');
+  check('Claude Code 路線不呼叫 API', window.__fetches.length === apiBefore);
+  check('橋接請求含逐字稿', runMsg?.user.includes('我們先看金流的部分'), (runMsg?.user || '').slice(0, 60));
+  check('橋接請求用純文字格式（CLI 不保證 JSON schema）',
+    runMsg?.system.includes('主題: 詞1, 詞2'), (runMsg?.system || '').slice(-80));
+
+  window.__native.port.reply({ id: runMsg.id, ok: true, text: [
+    '主題: 預算',
+    '重點: 預算還有兩成沒動用',
+    '待辦: 李美華|下週提預算報告',
+  ].join('\n') });
+  await ccSum; await settle();
+  const ccSummary = store.getState().summary;
+  check('Claude Code 的摘要有解析並存好',
+    ccSummary?.summary[0] === '預算還有兩成沒動用', JSON.stringify(ccSummary?.summary));
+  check('Claude Code 的待辦解析出負責人',
+    ccSummary?.actions[0]?.owner === '李美華', JSON.stringify(ccSummary?.actions));
+
+  // 即時回答仍然走本機模型，不走橋接
+  const nativeBefore = window.__native.posted.length;
+  const localBefore = got('localRun').length;
+  send({ type: 'ma:ask', question: '預算的事怎麼回？' });
+  await settle(); await settle();
+  check('即時回答不走橋接', window.__native.posted.length === nativeBefore,
+    JSON.stringify(window.__native.posted.slice(nativeBefore)));
+  check('即時回答走本機模型', got('localRun').length === localBefore + 1);
+
+  // 關掉「即時回答用本機模型」後，回答才會落到 Claude Code
+  SETTINGS.fastAnswersLocal = false;
+  const info2 = await send({ type: 'ma:provider' });
+  check('關掉開關後回答改走 Claude Code', info2?.answerProvider === 'claude-code', info2?.answerProvider);
+
+  // ══ 自架 Jitsi 網域 → match pattern ═════════════════════════════
+  // 使用者會用各種方式輸入，全部要能收斂成合法的 pattern
+  const pats = jitsiPatterns('jitsi.mycompany.com, https://meet.example.org/room123  8x8.vc');
+  check('網域轉成 match pattern', pats[0] === 'https://jitsi.mycompany.com/*', JSON.stringify(pats));
+  check('貼整個網址也能用（路徑會被去掉）', pats[1] === 'https://meet.example.org/*', JSON.stringify(pats));
+  check('空白分隔也接受', pats.length === 3, JSON.stringify(pats));
+  check('不合法的輸入被丟掉',
+    jitsiPatterns('localhost, 不是網域, ., http://').length === 0,
+    JSON.stringify(jitsiPatterns('localhost, 不是網域, ., http://')));
+  check('空字串不會產生 pattern', jitsiPatterns('').length === 0);
+
+  // ══ 附上會議畫面提問（Claude Code 用 Read 工具看 PNG）════════════
+  SETTINGS.fastAnswersLocal = false;      // 讓即時回答也走 Claude Code
+  const shotsBefore = window.__downloads.length;
+  const nativeCount = window.__native.posted.length;
+  send({ type: 'ma:ask', question: '畫面上那張圖的數字是多少？', withScreen: true });
+  await settle(); await settle(); await settle();
+
+  const shot = window.__downloads[shotsBefore];
+  check('附畫面時會存一張截圖', !!shot && shot.filename.includes('提問畫面'),
+    JSON.stringify(shot || null));
+  const imgRun = window.__native.posted.slice(nativeCount).find((m) => m.type === 'run');
+  check('截圖的絕對路徑有送給 Claude Code',
+    imgRun?.imagePath === 'C:\\Users\\test\\Downloads\\會議助手\\提問畫面-x.png', imgRun?.imagePath);
+  check('附畫面時仍然帶著逐字稿', imgRun?.user?.includes('畫面上那張圖') === true, (imgRun?.user || '').slice(0, 40));
+  check('答案卡片有收到「正在讀取會議畫面」的說明',
+    got('answerNote').some((n) => n.payload.note.includes('會議畫面')),
+    JSON.stringify(got('answerNote').map((n) => n.payload.note)));
+
+  // 沒勾選時不該白白截圖
+  const shotsNow = window.__downloads.length;
+  send({ type: 'ma:ask', question: '不用看畫面' });
+  await settle(); await settle();
+  check('沒勾選附畫面就不截圖', window.__downloads.length === shotsNow);
+
+  // 本機模型看不懂圖片 → 這一題升級到 Claude Code，而不是回一句「我看不懂」
+  SETTINGS.provider = 'chrome-ai';
+  const shotsLocal = window.__downloads.length;
+  const localRunsBefore = got('localRun').length;
+  const nativeBefore2 = window.__native.posted.length;
+  send({ type: 'ma:ask', question: '看一下畫面上的數字', withScreen: true });
+  await settle(); await settle(); await settle();
+
+  check('本機模型勾了附畫面時仍然會截圖（因為升級了後端）',
+    window.__downloads.length === shotsLocal + 1, `多了 ${window.__downloads.length - shotsLocal} 張`);
+  check('這一題改走 Claude Code 而不是本機模型',
+    got('localRun').length === localRunsBefore
+      && window.__native.posted.slice(nativeBefore2).some((m) => m.type === 'run' && m.imagePath),
+    JSON.stringify(window.__native.posted.slice(nativeBefore2).map((m) => m.type)));
+  check('有告知使用者為什麼換了後端',
+    got('answerNote').some((n) => n.payload.note.includes('改用 Claude Code')),
+    JSON.stringify(got('answerNote').map((n) => n.payload.note)));
+
+  // 沒勾附畫面時，本機模型照舊處理（不該因為上面的升級邏輯而改變）
+  const localRuns2 = got('localRun').length;
+  send({ type: 'ma:ask', question: '純文字問題' });
+  await settle(); await settle();
+  check('沒勾附畫面時本機模型照舊處理', got('localRun').length === localRuns2 + 1);
+  SETTINGS.provider = 'claude-code';
+
+  // ══ 這台機器跑不動 Gemini Nano 時的退路 ═══════════════════════
+  // Nano 要 >4GB VRAM 與 >22GB 可用磁碟，很多筆電（含這台）達不到。
+  // 側邊欄偵測到之後會寫回 localModelUnsupported，免費路線要自動改走
+  // Claude Code，而不是安靜地什麼都不做。
+  SETTINGS.provider = 'auto';
+  SETTINGS.apiKey = '';
+  SETTINGS.fastAnswersLocal = true;
+  SETTINGS.localModelUnsupported = true;
+
+  const noNano = await send({ type: 'ma:provider' });
+  check('本機模型跑不動時摘要改走 Claude Code', noNano?.provider === 'claude-code', noNano?.provider);
+  check('本機模型跑不動時即時回答也改走 Claude Code（忽略「回答用本機模型」開關）',
+    noNano?.answerProvider === 'claude-code', noNano?.answerProvider);
+  check('退路仍然是免費的', noNano?.free === true);
+  check('退路會提示需要橋接', noNano?.needsBridge === true && noNano?.needsPanel === false,
+    JSON.stringify({ bridge: noNano?.needsBridge, panel: noNano?.needsPanel }));
+  check('回報本機模型不支援，給 UI 顯示用', noNano?.localUnsupported === true);
+
+  // 有 API 金鑰時不該被這個旗標影響
+  SETTINGS.apiKey = 'sk-ant-test';
+  const withKey = await send({ type: 'ma:provider' });
+  check('有金鑰時仍走 Claude API，不受本機模型旗標影響',
+    withKey?.provider === 'claude' && withKey?.answerProvider === 'claude', JSON.stringify(withKey?.provider));
+
+  } catch (err) {
+    // 中斷也要把已完成的結果印出來，否則看不出斷在哪一步
+    results.push(`FAIL  測試中斷  →  ${err.stack || err}`);
+  }
+
+  const failed = results.filter((x) => x.startsWith('FAIL')).length;
+  document.getElementById('out').textContent =
+    results.join('\n') + '\n---\n' + (failed === 0 ? `全部 ${results.length} 項通過` : `${failed} 項失敗`);
+})();
+</script>
+</body></html>

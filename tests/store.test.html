@@ -1,0 +1,118 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>store.js 測試</title></head>
+<body><pre id="out"></pre>
+<script>
+// chrome.storage stub（store.js 每次變動會延遲寫回）
+const written = [];
+window.chrome = {
+  storage: { local: {
+    get: async () => ({}),
+    set: async (obj) => { written.push(obj); },
+  } },
+};
+</script>
+<script src="store.test.js"></script>
+<script>
+const results = [];
+const check = (name, cond, extra = '') =>
+  results.push(`${cond ? 'PASS' : 'FAIL'}  ${name}${cond ? '' : '  →  ' + extra}`);
+
+const seg = (id, text, final = true) => ({
+  id, text, final, speaker: '王小明', ts: Date.now(), startedAt: Date.now(), source: 'captions',
+});
+
+// ── 開始一場會議 ───────────────────────────────────────────────
+startMeetingIfNeeded({ sessionId: 's1', platform: 'google-meet', title: '週會', url: 'https://meet.google.com/abc-defg-hij' });
+check('會議已建立', getState().meeting?.sessionId === 's1');
+
+// ── 定稿去重：同一個 id 只佔一列 ────────────────────────────────
+let r = upsertSegment(seg('A', '第一句'));
+check('第一次定稿視為新段落', r.isNewFinal === true);
+r = upsertSegment(seg('A', '第一句加長了'));
+check('同 id 再次定稿不算新段落', r.isNewFinal === false);
+check('同 id 只有一列', getState().segments.length === 1, `共 ${getState().segments.length} 列`);
+check('同 id 內容已更新', getState().segments[0].text === '第一句加長了', getState().segments[0].text);
+
+r = upsertSegment(seg('B', '第二句'));
+check('不同 id 增加一列', getState().segments.length === 2, `共 ${getState().segments.length} 列`);
+
+// ── 未定稿的即時文字 ───────────────────────────────────────────
+upsertSegment(seg('C', '正在講…', false));
+check('未定稿放進 partials', getState().partials.length === 1);
+check('未定稿不進逐字稿', getState().segments.length === 2);
+upsertSegment(seg('C', '正在講的話講完了'));
+check('定稿後清掉 partial', getState().partials.length === 0);
+check('定稿後進逐字稿', getState().segments.length === 3, `共 ${getState().segments.length} 列`);
+
+// ── 重新整理分頁：同網址不該清空逐字稿 ─────────────────────────
+const changed = startMeetingIfNeeded({ sessionId: 's2', platform: 'google-meet', title: '週會', url: 'https://meet.google.com/abc-defg-hij?authuser=0' });
+check('同網址不算新會議', changed === false);
+check('同網址保留逐字稿', getState().segments.length === 3, `共 ${getState().segments.length} 列`);
+check('同網址更新 sessionId', getState().meeting.sessionId === 's2', getState().meeting.sessionId);
+
+// ── 換另一場會議：應該清空 ─────────────────────────────────────
+startMeetingIfNeeded({ sessionId: 's3', platform: 'google-meet', title: '另一場', url: 'https://meet.google.com/zzz-zzzz-zzz' });
+check('換會議清空逐字稿', getState().segments.length === 0, `共 ${getState().segments.length} 列`);
+
+// ── 混合來源的排序：本機辨識延遲 20 秒才回來，不能排在後面 ────────
+startMeetingIfNeeded({ sessionId: 's-order', platform: 'jitsi', title: '混合來源', url: 'https://meet.jit.si/x' });
+const T = 1_700_000_000_000;
+// 麥克風即時送出（說話時間 T+5000）
+upsertSegment({ id: 'mic-1', speaker: '我（麥克風）', text: '我覺得可以', final: true,
+  ts: T + 5000, startedAt: T + 5000, source: 'me' });
+// 本機辨識晚 20 秒才送出，但那句話是 T+1000 說的
+upsertSegment({ id: 'w-1', speaker: '其他人（本機辨識）', text: '這個方案大家覺得如何', final: true,
+  ts: T + 21000, startedAt: T + 1000, source: 'audio' });
+
+const ordered = getState().segments.map((s) => s.id);
+check('晚抵達但早發生的段落會插到正確位置',
+  ordered.indexOf('w-1') < ordered.indexOf('mic-1'), ordered.join(' → '));
+check('兩段都在逐字稿裡', ordered.includes('w-1') && ordered.includes('mic-1'));
+check('匯出的順序也正確',
+  toMarkdown().indexOf('這個方案大家覺得如何') < toMarkdown().indexOf('我覺得可以'));
+
+// 之後正常遞增的段落還是接在最後（字幕路徑不受影響）
+upsertSegment({ id: 'mic-2', speaker: '我（麥克風）', text: '那就這樣', final: true,
+  ts: T + 30000, startedAt: T + 30000, source: 'me' });
+check('正常遞增的段落仍接在最後',
+  getState().segments[getState().segments.length - 1].id === 'mic-2',
+  getState().segments.map((s) => s.id).join(' → '));
+
+// ── 摘要排程 ──────────────────────────────────────────────────
+for (let i = 0; i < 3; i++) upsertSegment(seg(`S${i}`, `句子 ${i}`));
+// 兩個條件是 AND：everyMs 是最短間隔（節流上限），everySegments 是最少新內容。
+// everyMs 用 -1／0 代表「時間窗已經過去」。
+check('段數與時間都沒到：不摘要', summaryDue({ everySegments: 8, everyMs: 60000 }) === false);
+check('段數到了但時間沒到：不摘要（這才是節流的重點）',
+  summaryDue({ everySegments: 3, everyMs: 60000 }) === false);
+check('時間到了但段數不足：不摘要（冷場不為兩句話燒額度）',
+  summaryDue({ everySegments: 99, everyMs: -1 }) === false);
+check('兩個都到：才摘要', summaryDue({ everySegments: 3, everyMs: -1 }) === true);
+// 失敗後的退避：時間基準往前推，但累積的段數要留著（內容不能丟）
+const pendingBefore = getState().pendingSinceSummary;
+deferSummary();
+check('摘要失敗後不會立刻重試', summaryDue({ everySegments: 3, everyMs: 60000 }) === false);
+check('摘要失敗後保留累積的段數', getState().pendingSinceSummary === pendingBefore,
+  `退避前 ${pendingBefore}，退避後 ${getState().pendingSinceSummary}`);
+check('退避時間過了以後會再試一次', summaryDue({ everySegments: 3, everyMs: -1 }) === true);
+
+markSummarized({ topics: ['API'], summary: ['談了 API'], decisions: [], actions: [{ owner: '王小明', task: '補文件' }], open_questions: [] });
+check('摘要後計數歸零，即使時間條件成立也不再觸發',
+  summaryDue({ everySegments: 3, everyMs: -1 }) === false);
+check('摘要已存入', getState().summary?.summary[0] === '談了 API');
+
+// ── Markdown 匯出 ─────────────────────────────────────────────
+const md = toMarkdown();
+check('匯出含摘要', md.includes('## 重點摘要') && md.includes('談了 API'));
+check('匯出含待辦與負責人', md.includes('- [ ] （王小明）補文件'), md.split('\n').find((l) => l.includes('[ ]')) || '找不到待辦行');
+check('匯出含逐字稿內容', md.includes('句子 0'));
+
+// ── 清除 ──────────────────────────────────────────────────────
+clearAll();
+check('清除後逐字稿為空', getState().segments.length === 0 && getState().summary === null);
+
+const failed = results.filter((x) => x.startsWith('FAIL')).length;
+results.push('---', failed === 0 ? `全部 ${results.length - 1} 項通過` : `${failed} 項失敗`);
+document.getElementById('out').textContent = results.join('\n');
+</script>
+</body></html>

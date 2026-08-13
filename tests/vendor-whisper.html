@@ -1,0 +1,78 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>MA|starting</title>
+<h3>vendor/ 離線驗證</h3>
+<p>確認內建的 whisper 模型與 ONNX Runtime 在<strong>完全沒有網路</strong>的情況下能載入並辨識。
+執行方式見 <code>tests/run-vendor-check.ps1</code>（會用 <code>--host-resolver-rules</code> 把所有 DNS 打掉）。</p>
+<pre id="out" style="font:13px monospace;white-space:pre-wrap">starting</pre>
+<script src="speech.js"></script>
+<script type="module">
+const out = document.getElementById('out');
+const lines = [];
+const log = (s) => { lines.push(s); out.textContent = lines.join('\n'); try { localStorage.setItem('ma_vendor', lines.join('\n')); } catch {} };
+const status = (s) => { document.title = `MA|${s}`; };
+
+function decodeWav(bytes) {
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let pos = 12, rate = 22050, channels = 1, bits = 16, dataOff = -1, dataLen = 0;
+  while (pos + 8 <= dv.byteLength) {
+    const id = String.fromCharCode(bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]);
+    const size = dv.getUint32(pos + 4, true);
+    if (id === 'fmt ') { channels = dv.getUint16(pos + 10, true); rate = dv.getUint32(pos + 12, true); bits = dv.getUint16(pos + 22, true); }
+    else if (id === 'data') { dataOff = pos + 8; dataLen = size; break; }
+    pos += 8 + size + (size % 2);
+  }
+  const n = Math.floor(dataLen / 2 / channels);
+  const mono = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    let sum = 0;
+    for (let c = 0; c < channels; c++) sum += dv.getInt16(dataOff + (i * channels + c) * 2, true) / 32768;
+    mono[i] = sum / channels;
+  }
+  if (rate === 16000) return mono;
+  const ratio = rate / 16000, outLen = Math.floor(n / ratio), res = new Float32Array(outLen);
+  for (let i = 0; i < outLen; i++) {
+    const x = i * ratio, i0 = Math.floor(x), i1 = Math.min(i0 + 1, n - 1);
+    res[i] = mono[i0] + (mono[i1] - mono[i0]) * (x - i0);
+  }
+  return res;
+}
+
+(async () => {
+  try {
+    status('import');
+    const { pipeline, env } = await import('../vendor/transformers/transformers.min.js');
+    log('transformers.min.js 由 vendor/ 載入 OK（沒有走 CDN）');
+
+    // 只准讀本機檔案。**必須用絕對 URL**：這兩個路徑是相對於
+    // transformers.min.js 自己的位置解析的，寫 '../vendor/' 會變成
+    // vendor/vendor/。擴充功能裡用的 '/vendor/...' 本來就是絕對路徑，
+    // 所以 whisper-worker.js 沒有這個陷阱，但這個測試頁在 file:// 上有。
+    const base = new URL('../vendor/', location.href).href;
+    env.allowLocalModels = true;
+    env.allowRemoteModels = false;
+    env.localModelPath = `${base}models/`;
+    env.backends.onnx.wasm.wasmPaths = `${base}transformers/`;
+
+    const audio = decodeWav(Uint8Array.from(atob(window.__wavB64), (c) => c.charCodeAt(0)));
+    log(`音檔：${(audio.length / 16000).toFixed(1)} 秒`);
+
+    status('load');
+    const t0 = performance.now();
+    const asr = await pipeline('automatic-speech-recognition', 'Xenova/whisper-base', { dtype: 'q8' });
+    log(`模型由 vendor/ 載入：${((performance.now() - t0) / 1000).toFixed(1)} 秒`);
+
+    status('run');
+    const t1 = performance.now();
+    const res = await asr(audio, { language: 'chinese', task: 'transcribe', chunk_length_s: 30 });
+    const runS = (performance.now() - t1) / 1000;
+    log(`辨識：${runS.toFixed(1)} 秒　RTF ${(runS / (audio.length / 16000)).toFixed(2)}`);
+    log(`輸出：${res.text}`);
+    log(res.text && res.text.length > 5 ? '\nPASS 離線可用' : '\nFAIL 沒有輸出');
+    status(res.text && res.text.length > 5 ? 'DONE' : 'FAIL');
+  } catch (e) {
+    log(`FAIL ${e.message}`);
+    status('FAIL');
+  }
+})();
+</script>

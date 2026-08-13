@@ -1,0 +1,21 @@
+# 一般文字檔交給 git 自動判斷
+* text=auto
+
+# ── 這兩條不是風格偏好，是正確性問題 ──────────────────────────
+#
+# .bat 必須是 CRLF。cmd.exe 讀 LF-only 的批次檔會把指令 token 切錯，
+# 症狀是 powershell.exe 被拆成 powershell. 與 exe，Native Messaging 主機
+# 一啟動就死。在 macOS/Linux 上 clone（autocrlf=input）就會踩到，
+# 所以用 eol=crlf 強制，而不是依賴各人的 git 設定。
+*.bat text eol=crlf
+
+# .ps1 只在 Windows 上跑，一律 CRLF，順便避免混合換行。
+# （另一個地雷是 UTF-8 BOM —— git 不會動 BOM，但編輯器會，
+#  改完請用 tests\check-project.ps1 確認。）
+*.ps1 text eol=crlf
+
+# ── 二進位 ─────────────────────────────────────────────────────
+*.png binary
+*.onnx binary
+*.wasm binary
+*.bin binary

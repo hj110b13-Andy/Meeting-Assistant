@@ -1,0 +1,68 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>會議助手 測試 — 簡繁轉換</title></head>
+<body>
+<pre id="out"></pre>
+
+<script src="s2t-table.js"></script>
+<script src="s2t.js"></script>
+
+<script>
+const results = [];
+const check = (name, cond, detail = '') =>
+  results.push(`${cond ? 'PASS' : 'FAIL'}  ${name}${cond ? '' : `  →  ${detail}`}`);
+const eq = (name, input, want) => {
+  const got = toTraditional(input);
+  check(name, got === want, `得到「${got}」，預期「${want}」`);
+};
+
+// ── 對照表本身 ──────────────────────────────────────────────────
+const stats = __s2tStats();
+check('單字表載入成功（數千條）', stats.chars > 2000, String(stats.chars));
+check('詞組表載入成功', stats.phrases > 5000, String(stats.phrases));
+
+// ── 真正促使我們做這件事的那段音訊 ──────────────────────────────
+// 原生 whisper small 的實際輸出（它中文比 base 準得多，但吐簡體）
+eq('會議實測句子整句轉換',
+  '我先讲一下这季的目标，结账失败率要压到百分之一以下。目前卡在第三方对账的接口还没开通。',
+  '我先講一下這季的目標，結帳失敗率要壓到百分之一以下。目前卡在第三方對帳的接口還沒開通。');
+
+eq('人名也要轉對（小陈 → 小陳）', '这题交给小陈处理', '這題交給小陳處理');
+
+// ── 一對多的字：只有詞組表能決定選哪個 ──────────────────────────
+// 這是「為什麼不能只用單字表」的證明：发 可以是 發 也可以是 髮。
+eq('发布 → 發布', '下周发布新版本', '下週發布新版本');
+eq('头发 → 頭髮', '他的头发白了', '他的頭髮白了');
+eq('干净 → 乾淨', '把资料清干净', '把資料清乾淨');
+eq('干部 → 幹部', '所有干部都要参加', '所有幹部都要參加');
+eq('了解 vs 明了', '我了解了', '我瞭解了');
+
+// ── 台灣用字 ────────────────────────────────────────────────────
+eq('台北不會被改成臺北', '台北的团队', '台北的團隊');
+eq('里 → 裡（表示內部）', '在系统里面', '在系統裡面');
+
+// ── 已經是繁體的文字不該被弄壞（字幕來源會經過同一條路） ──────────
+eq('繁體輸入原樣輸出',
+  '我們先看金流的部分，結帳失敗率是百分之三。',
+  '我們先看金流的部分，結帳失敗率是百分之三。');
+eq('英文與數字不受影響', 'API v2.1 will ship on 8/20 — OK?', 'API v2.1 will ship on 8/20 — OK?');
+eq('中英數混雜也正常', '这个 API 的 QPS 上限是 1000', '這個 API 的 QPS 上限是 1000');
+
+// ── 邊界 ────────────────────────────────────────────────────────
+check('空字串', toTraditional('') === '');
+check('null 不會爆', toTraditional(null) === null);
+check('undefined 不會爆', toTraditional(undefined) === undefined);
+eq('單一個字', '这', '這');
+eq('只有標點', '，。！？', '，。！？');
+// 詞組表最長 12 個 UTF-16 單位，字串尾端不足時不能讀出界
+eq('字串結尾的短片段不會讀出界', '开', '開');
+
+// ── 轉換過的結果再轉一次應該不變（冪等） ────────────────────────
+const once = toTraditional('我先讲一下这季的目标，结账失败率要压到百分之一以下。');
+check('轉換是冪等的（再轉一次不變）', toTraditional(once) === once, `${once} → ${toTraditional(once)}`);
+
+const failed = results.filter((r) => r.startsWith('FAIL')).length;
+results.push('---');
+results.push(failed === 0 ? `全部 ${results.length - 1} 項通過` : `${failed} 項失敗`);
+document.getElementById('out').textContent = results.join('\n');
+</script>
+</body></html>

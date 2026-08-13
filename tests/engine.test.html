@@ -1,0 +1,284 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>會議助手 測試</title></head>
+<body>
+<!-- 合成的 Google Meet 字幕 DOM（依 meet.js 的選擇器） -->
+<div jsname="dsyhDe">
+  <div class="nMcdL" id="m1">
+    <img class="KpxDtd" alt="">
+    <div class="NWpY1d">王小明</div>
+    <div jsname="tgaKEf"><span id="m1t">你好</span></div>
+  </div>
+</div>
+
+<!-- 合成的 Teams 字幕 DOM（依 teams.js 的選擇器） -->
+<div data-tid="closed-caption-v2-window">
+  <div class="fui-ChatMessageCompact" id="t1">
+    <span data-tid="author">Alice Chen</span>
+    <span data-tid="closed-caption-text" id="t1t">Let's start with the API design</span>
+  </div>
+</div>
+
+<!-- 合成的 Jitsi 字幕 DOM：照 meet.jit.si app.bundle.min.js (v9365) 的實際結構。
+     class name 故意寫成雜湊的樣子（實際就是 tss/emotion 產生的），確認選擇器
+     完全不依賴 class。兩個陷阱都要覆蓋：
+       1. 姓名只出現在每組第一則 → 第二則要從同組繼承
+       2. 每則都有時間戳元素 → 不能被當成字幕內容 -->
+<div id="subtitles-messages-container">
+  <div id="subtitles-messages-list">
+    <div class="css-1a2b3c">
+      <div class="css-avatar"></div>
+      <div class="css-4d5e6f">
+        <div class="css-msg">
+          <div class="css-content" id="j1">
+            <div class="css-hdr">陳小明</div>
+            <div class="css-text" id="j1t">我先講一下這季的目標</div>
+            <div class="css-ts">上午11:19:29</div>
+          </div>
+        </div>
+        <div class="css-msg">
+          <div class="css-content" id="j2">
+            <div class="css-text" id="j2t">失敗率要壓到 1% 以下</div>
+            <div class="css-ts">上午11:19:41</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<pre id="out"></pre>
+
+<script>
+// ── 假時鐘 + 攔截 setInterval，讓引擎可以被同步驅動 ──────────────
+let NOW = 1_000_000;
+Date.now = () => NOW;
+const captured = [];
+window.setInterval = (fn, ms) => { captured.push({ fn, ms }); return captured.length; };
+
+// ── chrome API stub，收集引擎送出的訊息 ────────────────────────
+const sent = [];
+window.chrome = {
+  runtime: {
+    lastError: undefined,
+    sendMessage: (msg, cb) => { sent.push(msg); cb && cb(); },
+  },
+};
+</script>
+
+<script src="core.js"></script>
+<script src="meet.js"></script>
+<script src="teams.js"></script>
+<script src="jitsi.js"></script>
+
+<script>
+const results = [];
+function check(name, cond, extra = '') {
+  results.push(`${cond ? 'PASS' : 'FAIL'}  ${name}${cond ? '' : '  →  ' + extra}`);
+}
+
+// 只驅動 300ms 的掃描器（statusTimer 是 3000ms，這裡不需要）
+const scanners = captured.filter((c) => c.ms === 300).map((c) => c.fn);
+function tick(advanceMs) { NOW += advanceMs; scanners.forEach((fn) => fn()); }
+
+const segs = (platform, final) => sent
+  .filter((m) => m.type === 'ma:segment' && m.payload.platform === platform && m.payload.final === final)
+  .map((m) => m.payload);
+const last = (arr) => arr[arr.length - 1];
+
+check('引擎啟動時註冊了掃描器', scanners.length === 3, `找到 ${scanners.length} 個（預期 Meet + Teams + Jitsi 各一）`);
+
+// ── mergeCaption 單元測試 ──────────────────────────────────────
+const { mergeCaption, overlaps } = globalThis.__MA_CORE__;
+check('merge：逐步加長', mergeCaption('你好', '你好，我是') === '你好，我是', mergeCaption('你好', '你好，我是'));
+check('merge：舊的已包含新的', mergeCaption('你好，我是小陳', '你好，我是') === '你好，我是小陳');
+check('merge：視窗滑動接尾',
+  mergeCaption('你好，我是王小明，負責金流', '我是王小明，負責金流後端') === '你好，我是王小明，負責金流後端',
+  mergeCaption('你好，我是王小明，負責金流', '我是王小明，負責金流後端'));
+check('merge：完全不重疊則接上', mergeCaption('第一句。', '第二句') === '第一句。第二句', mergeCaption('第一句。', '第二句'));
+check('overlaps：無關文字判定為不重疊', overlaps('討論 API 設計', '午餐吃什麼') === false);
+
+// ── Meet：串流改寫 → 合併 → 定稿 ───────────────────────────────
+tick(300);
+let p = last(segs('google-meet', false));
+check('Meet：抓到說話者姓名', p && p.speaker === '王小明', p ? p.speaker : '沒有 partial');
+check('Meet：抓到字幕文字', p && p.text === '你好', p ? p.text : '—');
+
+document.getElementById('m1t').textContent = '你好，我是王小明';
+tick(300);
+document.getElementById('m1t').textContent = '我是王小明，負責金流後端';   // 視窗滑動
+tick(300);
+p = last(segs('google-meet', false));
+check('Meet：改寫後合併正確', p && p.text === '你好，我是王小明，負責金流後端', p ? p.text : '—');
+
+tick(2500);   // 超過 FINALIZE_MS
+let f = segs('google-meet', true);
+check('Meet：停止變動後定稿', f.length === 1, `定稿數 ${f.length}`);
+check('Meet：定稿內容完整', f[0] && f[0].text === '你好，我是王小明，負責金流後端', f[0] ? f[0].text : '—');
+const meetId1 = f[0] && f[0].id;
+
+// ── Meet：同一節點被重用裝下一句（Teams 虛擬列表的行為） ─────────
+document.getElementById('m1t').textContent = '那我們下週再確認一次';
+tick(300); tick(2500);
+f = segs('google-meet', true);
+check('節點重用時不覆蓋前一句', f.length === 2, `定稿數 ${f.length}（應為 2）`);
+check('節點重用時 id 不同', f.length === 2 && f[1].id !== meetId1,
+  f.length === 2 ? `${meetId1} vs ${f[1].id}` : '—');
+
+// ── Meet：同一節點換人講話 → 前一句先定稿 ──────────────────────
+document.querySelector('#m1 .NWpY1d').textContent = '李美華';
+document.getElementById('m1t').textContent = '我補充一點';
+tick(300);
+p = last(segs('google-meet', false));
+check('換人講話時說話者更新', p && p.speaker === '李美華', p ? p.speaker : '—');
+tick(2500);
+f = segs('google-meet', true);
+check('換人講話時前一句已定稿', f.length === 3, `定稿數 ${f.length}（應為 3）`);
+
+// ── Teams：data-tid 選擇器 ────────────────────────────────────
+let tp = last(segs('ms-teams', false));
+check('Teams：抓到說話者姓名', tp && tp.speaker === 'Alice Chen', tp ? tp.speaker : '沒有 partial');
+check('Teams：抓到字幕文字', tp && tp.text === "Let's start with the API design", tp ? tp.text : '—');
+document.getElementById('t1t').textContent = "Let's start with the API design and the auth flow";
+tick(300); tick(2500);
+const tf = segs('ms-teams', true);
+// 這一句在前面的 Meet 測試期間就已經定稿過（每次 tick 兩個引擎都會掃），
+// 之後文字延長 → 沿用同一個 id 再送一次定稿。所以要看最後一次、
+// 並確認所有定稿共用同一個 id（store 端才會是同一列而非多列）。
+check('Teams：延長後的定稿內容完整',
+  tf.length && last(tf).text === "Let's start with the API design and the auth flow",
+  tf.length ? last(tf).text : '沒有定稿');
+check('Teams：同一句的多次定稿共用同一個 id',
+  tf.length > 0 && new Set(tf.map((x) => x.id)).size === 1,
+  tf.map((x) => x.id).join(' / '));
+
+// ── 選擇器過期時的韌性 ────────────────────────────────────────
+// Meet 與 Teams 的 class name／data-tid 每隔幾個月就換一批。這幾項測的是
+// 「已知名字全部失效時還抓不抓得到」，因為那才是真正會發生的失敗模式。
+
+// 引擎會把找到的 root 記起來，只有在它離開文件時才重新尋找。所以要模擬
+// 「改版後舊選擇器全失效」，得先把舊的字幕面板從文件裡拿掉。
+
+// Meet：雜湊 class 全沒了，只剩無障礙用的 role="region"＋語意結構
+{
+  const oldRoot = document.querySelector('div[jsname="dsyhDe"]');
+  oldRoot.remove();
+
+  const box = document.createElement('div');
+  box.setAttribute('role', 'region');
+  box.setAttribute('aria-label', 'Captions');
+  box.innerHTML = `
+    <div class="totally-new-hash">
+      <img src="data:," alt="">
+      <span>張大衛</span>
+      <div><div>下一版要處理權限的部分</div></div>
+    </div>`;
+  document.body.appendChild(box);
+  tick(300); tick(300);
+  const mp = segs('google-meet', false).filter((x) => x.text.includes('權限')).pop();
+  check('Meet：class 全部失效時，靠 role="region" 仍找得到字幕面板',
+    !!mp, '沒有抓到任何 partial');
+  check('Meet：class 全部失效時，靠結構仍拆得出說話者',
+    mp && mp.speaker === '張大衛', mp ? mp.speaker : '—');
+  check('Meet：class 全部失效時，內容不會混進說話者名字',
+    mp && mp.text === '下一版要處理權限的部分', mp ? mp.text : '—');
+  box.remove();
+  document.body.appendChild(oldRoot);   // 還原，後面的測試還要用
+}
+
+// Teams：字幕視窗的 data-tid 改名了，但一定還含 closed-caption 這串
+{
+  const oldRoot = document.querySelector('div[data-tid="closed-caption-v2-window"]');
+  oldRoot.remove();
+
+  const box = document.createElement('div');
+  box.setAttribute('data-tid', 'closed-caption-v3-something-new');
+  box.innerHTML = `
+    <div class="fui-ChatMessageCompact" data-caption-id="cap-77">
+      <span data-tid="author">Bob Lin</span>
+      <span data-tid="closed-caption-text">We should ship on Friday</span>
+    </div>`;
+  document.body.appendChild(box);
+  tick(300); tick(300);
+  const tnew = segs('ms-teams', false).filter((x) => x.text.includes('Friday')).pop();
+  check('Teams：data-tid 改名後，靠萬用比對仍找得到字幕視窗',
+    !!tnew, '沒有抓到任何 partial');
+  check('Teams：仍然抓得到說話者', tnew && tnew.speaker === 'Bob Lin', tnew ? tnew.speaker : '—');
+
+  // 虛擬列表會回收 DOM 節點：同一個節點換成另一則字幕（不同 caption-id）
+  // 時，必須算成新的一句，不能跟前一句黏在一起。
+  const row = box.querySelector('.fui-ChatMessageCompact');
+  const idBefore = tnew.id;
+  row.setAttribute('data-caption-id', 'cap-78');
+  row.querySelector('[data-tid="closed-caption-text"]').textContent = 'Actually Monday works better';
+  tick(300);
+  const reused = segs('ms-teams', false).filter((x) => x.text.includes('Monday')).pop();
+  check('Teams：DOM 節點被回收裝新字幕時算成新的一句（靠 data-caption-id）',
+    reused && reused.id !== idBefore && reused.text === 'Actually Monday works better',
+    reused ? `${reused.id} / ${reused.text}` : '沒有抓到');
+  box.remove();
+  document.body.appendChild(oldRoot);
+}
+
+// ── Jitsi：聊天面板字幕分頁（真實結構，class 全是雜湊）───────────
+const jp = segs('jitsi', false);
+const j1p = jp.filter((x) => x.text.includes('這季的目標')).pop();
+const j2p = jp.filter((x) => x.text.includes('失敗率')).pop();
+
+check('Jitsi：抓到說話者姓名', j1p && j1p.speaker === '陳小明', j1p ? j1p.speaker : '沒有 partial');
+check('Jitsi：時間戳沒有被當成字幕內容',
+  j1p && j1p.text === '我先講一下這季的目標', j1p ? j1p.text : '—');
+check('Jitsi：同組第二則沒有姓名元素時，從同組繼承說話者',
+  j2p && j2p.speaker === '陳小明', j2p ? `${j2p.speaker} / ${j2p.text}` : '沒抓到第二則');
+
+document.getElementById('j1t').textContent = '我先講一下這季的目標，也就是這次要談的重點';
+tick(300); tick(2500);
+const jf = segs('jitsi', true).filter((x) => x.text.includes('這季的目標'));
+check('Jitsi：延長後的定稿內容完整',
+  jf.length && last(jf).text === '我先講一下這季的目標，也就是這次要談的重點',
+  jf.length ? last(jf).text : '沒有定稿');
+check('Jitsi：同一句的多次定稿共用同一個 id',
+  jf.length > 0 && new Set(jf.map((x) => x.id)).size === 1,
+  jf.map((x) => x.id).join(' / '));
+
+// 換人講話：Jitsi 依 senderId 分組，所以是**新增一組**，不是改同一組的姓名
+const g2 = document.createElement('div');
+g2.className = 'css-9z8y7x';
+g2.innerHTML = '<div class="css-avatar"></div><div class="css-grp">'
+  + '<div class="css-msg"><div class="css-content">'
+  + '<div class="css-hdr">李美華</div><div class="css-text">那預算的部分呢？</div>'
+  + '<div class="css-ts">上午11:20:03</div></div></div></div>';
+document.getElementById('subtitles-messages-list').appendChild(g2);
+tick(300); tick(2500);
+const jf2 = segs('jitsi', true).filter((x) => x.speaker === '李美華');
+check('Jitsi：換人講話時開新的一組，說話者正確', jf2.length > 0, '沒有李美華的定稿');
+check('Jitsi：換人時不會把兩句黏在一起',
+  jf2.length && last(jf2).text === '那預算的部分呢？', jf2.length ? last(jf2).text : '—');
+check('Jitsi：新的一組不影響前一組的說話者',
+  segs('jitsi', true).filter((x) => x.text.includes('失敗率')).every((x) => x.speaker === '陳小明'),
+  segs('jitsi', true).filter((x) => x.text.includes('失敗率')).map((x) => x.speaker).join(' / '));
+
+// splitSpeaker 只在舞台字幕用得到，但誤切風險要擋住：冒號後沒空白就不切
+check('Jitsi：句子裡的時間碼不會被誤切成說話者（舞台字幕路徑）',
+  (() => {
+    const d = document.createElement('div');
+    d.innerHTML = '<p><span>所以結論是我們下週上線，時間是 14:30</span></p>';
+    document.body.appendChild(d);
+    const saved = { mode: 'stage' };
+    // 直接測 adapter 行為：用 genericParse + splitSpeaker 的組合結果
+    const g = globalThis.__MA_CORE__.genericParse(d.querySelector('p'));
+    d.remove();
+    return g && g.text.includes('14:30') && !g.speaker;
+  })(), '時間碼被切成說話者了');
+
+// ── 狀態回報 ──────────────────────────────────────────────────
+const status = sent.filter((m) => m.type === 'ma:status').map((m) => m.payload);
+check('回報 Meet 已找到字幕', status.some((s) => s.platform === 'google-meet' && s.captionsFound));
+check('回報 Teams 已找到字幕', status.some((s) => s.platform === 'ms-teams' && s.captionsFound));
+check('回報 Jitsi 已找到字幕', status.some((s) => s.platform === 'jitsi' && s.captionsFound));
+
+const failed = results.filter((r) => r.startsWith('FAIL')).length;
+results.push('---');
+results.push(failed === 0 ? `全部 ${results.length - 1} 項通過` : `${failed} 項失敗`);
+document.getElementById('out').textContent = results.join('\n');
+</script>
+</body></html>
