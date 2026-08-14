@@ -6,6 +6,11 @@
   const check = (name, cond, extra = '') =>
     results.push(`${cond ? 'PASS' : 'FAIL'}  ${name}${cond ? '' : '  →  ' + extra}`);
 
+  // 整段包在 try 裡：沒有它的話，中途一個例外（例如讀到 undefined 的屬性）
+  // 會讓 #testout 根本不會被建立，runner 只看得到「沒有測試輸出」——
+  // 那句話完全不指向真正的原因，而且已經完成的結果也一起消失。
+  try {
+
   const port = window.__ports[0];
   check('panel.js 建立了與背景的連線', !!port && port.name === 'ma-panel', port ? port.name : '沒有 port');
   check('panel.js 註冊了訊息監聽器', !!port && port.listeners.length === 1,
@@ -169,13 +174,62 @@
     JSON.stringify(localMsgs.filter((m) => m.type === 'ma:local:done')));
 
   // 介面刻意精簡：這些按鈕已經移除，因為它們代表的動作現在都自動發生
-  for (const id of ['btnSummary', 'btnAudio', 'btnSnapshot']) {
+  for (const id of ['btnAudio', 'btnSnapshot']) {
     check(`#${id} 已移除（動作改成自動）`, !document.querySelector(`#${id}`));
   }
-  // 但「我的發言」必須留著：分頁擷取抓的是分頁播放出來的聲音，
-  // 你自己講的話不會經過那裡，只能靠麥克風。
-  check('保留「我的發言」按鈕（分頁擷取聽不到自己）',
-    !!document.querySelector('#btnMic'));
+
+  // ── 「我的發言」改成自動，不再是一顆要記得按的按鈕 ─────────────
+  // 分頁擷取抓的是分頁播放出來的聲音，你自己講的話不會經過那裡。
+  // 少了這條，逐字稿裡就永遠沒有你自己說過的話 —— 而那正是回答建議
+  // 最需要的上下文之一（「我剛剛才答應過什麼」）。
+  check('#btnMic 已移除（改成跟著聆聽自動開關）', !document.querySelector('#btnMic'));
+
+  // 先回到「沒在聽」的狀態，才有乾淨的起點 —— 頁面載入時餵的 state
+  // 已經是 audioFallback: true，麥克風那時就開起來了。
+  emit('status', { platform: 'google-meet', audioFallback: false });
+  await tick();
+  window.__recognizers.length = 0;
+
+  emit('status', { platform: 'google-meet', audioFallback: true, captionsFound: false });
+  await tick();
+  check('開始聆聽時自動啟動麥克風',
+    window.__recognizers.length === 1 && window.__recognizers[0]?.started === true,
+    JSON.stringify(window.__recognizers.map((r) => ({ s: r.started, e: r.stopped }))));
+
+  // renderStatus 會被呼叫很多次，不能每次都開一支新的
+  emit('status', { platform: 'google-meet', audioFallback: true, captionsFound: true });
+  await tick();
+  check('重複收到聆聽中的狀態不會開出第二支麥克風',
+    window.__recognizers.length === 1, `${window.__recognizers.length} 支`);
+
+  emit('status', { platform: 'google-meet', audioFallback: false });
+  await tick();
+  check('停止聆聽時自動關掉麥克風', window.__recognizers[0]?.stopped === true,
+    JSON.stringify(window.__recognizers.map((r) => ({ s: r.started, e: r.stopped }))));
+
+  // ── 手動產生重點 ──────────────────────────────────────────────
+  check('有「產生重點」按鈕', !!document.querySelector('#btnSummary'));
+
+  emit('status', { platform: 'google-meet', audioFallback: true });
+  await tick();
+  window.__sent.length = 0;
+  document.querySelector('#btnSummary').click();
+  await tick(); await tick();
+  check('按下去會要求背景立刻產生一次摘要',
+    window.__sent.some((m) => m.type === 'ma:summarizeNow'),
+    JSON.stringify(window.__sent.map((m) => m.type)));
+  // 立刻反映在畫面上，不要等背景廣播回來 —— 中間的空窗會讓人以為沒按到
+  check('按下去馬上顯示產生中', txt('#btnSummary').includes('產生中'), txt('#btnSummary'));
+
+  // 沒有逐字稿時按了也沒意義
+  emit('state', {
+    meeting: { sessionId: 's1', platform: 'google-meet', title: '產品週會', url: 'x', startedAt: now },
+    status: { platform: 'google-meet', audioFallback: true },
+    segments: [], partials: [], summary: null, answers: [],
+  });
+  await tick();
+  check('沒有逐字稿時「產生重點」是停用的',
+    document.querySelector('#btnSummary').disabled);
 
   // ── Chrome 內建模型：用不到就完全不要碰 ──────────────────────
   // 每一次 LanguageModel 呼叫，只要沒帶 outputLanguage，Chrome 就會在
@@ -202,6 +256,11 @@
   check('走雲端時徽章顯示雲端', txt('#providerBadge').includes('雲端'), txt('#providerBadge'));
   check('走雲端時不顯示「啟用免費模型」按鈕',
     document.querySelector('#btnLocal').classList.contains('hidden'));
+
+  } catch (err) {
+    // 中斷也要把已完成的結果印出來，否則看不出斷在哪一步
+    results.push(`FAIL  測試中斷  →  ${err && (err.stack || err.message || err)}`);
+  }
 
   const failed = results.filter((x) => x.startsWith('FAIL')).length;
   const pre = document.createElement('pre');

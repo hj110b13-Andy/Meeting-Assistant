@@ -16,6 +16,19 @@ self.LanguageModel = {
     }),
   }),
 };
+// 假的瀏覽器語音辨識（「我的發言」用的）。真的那顆會要麥克風權限、
+// 而且結果不確定，測試等不到；換成假的才驗得到「跟著聆聽自動開關」。
+window.__recognizers = [];
+window.SpeechRecognition = function () {
+  const r = {
+    started: false, stopped: false,
+    start() { if (this.started && !this.stopped) throw new Error('已經在跑'); this.started = true; this.stopped = false; },
+    stop() { this.stopped = true; this.onend?.(); },
+  };
+  window.__recognizers.push(r);
+  return r;
+};
+
 window.__ports = [];
 window.__sent = [];
 // 預設讓側邊欄以為目前走 Chrome 內建模型（needsPanel: true），

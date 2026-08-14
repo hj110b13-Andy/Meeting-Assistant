@@ -163,6 +163,15 @@ function renderStatus() {
   const listening = !!st.audioFallback;
   $('btnListen').classList.toggle('hidden', listening);
   if (!listening) resetListening();
+
+  // 「我的發言」跟著聆聽一起開關，不是一顆要自己記得按的按鈕。
+  // 兩個函式都是冪等的（已經在跑就直接返回），所以每次 renderStatus
+  // 都呼叫是安全的。
+  if (listening) startMic(); else stopMic({ quiet: true });
+
+  // 產生重點只有在有逐字稿的時候才有意義
+  $('btnSummary').disabled = summaryRunning || !state.segments?.length;
+  $('btnSummary').textContent = summaryRunning ? '產生中…' : '✦ 產生重點';
 }
 
 function highlight(text, q) {
@@ -694,7 +703,34 @@ async function startListening({ manual = false } = {}) {
 /** 換會議時要能重新開始聆聽 */
 function resetListening() { sttStarting = false; }
 
-// ── 我自己的發言 ────────────────────────────────────────────────
+/**
+ * 手動產生重點。
+ *
+ * 自動摘要有兩個門檻（累積夠多段 **且** 距上次夠久），所以「我現在就想要
+ * 一份」沒有別的辦法 —— 例如剛講完一個段落、或要在會議中途對齊進度。
+ *
+ * 背景的 `ma:summarizeNow` 走的是 `runSummary(true)`，**繞過那兩個門檻**；
+ * 成功之後 `store.markSummarized` 會把累積段數歸零、時間基準重設，
+ * 所以自動摘要的節奏是從這一刻重新開始算，不會出現「才剛手動產生完，
+ * 一分鐘後又自動跑一次」。沒按的話一切照舊。
+ */
+$('btnSummary').addEventListener('click', async () => {
+  if (!state.segments?.length) { showBanner('還沒有逐字稿可以整理。', 6000); return; }
+  // 立刻反映在畫面上，不要等背景廣播回來 —— 那中間的空窗會讓人以為沒按到
+  summaryRunning = true;
+  renderStatus();
+  const res = await chrome.runtime.sendMessage({ type: 'ma:summarizeNow' });
+  if (!res) {
+    summaryRunning = false;
+    renderStatus();
+    showBanner('背景沒有回應，重點沒有產生。請關掉側邊欄重開再試一次。', 12000);
+    return;
+  }
+  showBanner('正在產生重點，完成後會出現在「重點」分頁。自動摘要的計時與段數已經重新開始算。', 10000);
+  if (activeTab !== 'insights') document.querySelector('.tabs button[data-tab="insights"]')?.click();
+});
+
+// ── 我自己的發言（跟著聆聽自動開關）─────────────────────────────
 /**
  * 分頁擷取抓的是「分頁**播放出來**」的聲音 —— 也就是其他人的發言。
  * **你自己講的話不會經過那裡**（Meet 不會把你的麥克風回放給你，否則會有回音），
@@ -702,22 +738,29 @@ function resetListening() { sttStarting = false; }
  *
  * 用瀏覽器內建的 SpeechRecognition：免金鑰、免安裝，而且它本來就是為
  * 「一支麥克風、一個人講話」設計的，在這個用途上比 whisper 更合適也更即時。
+ *
+ * **這件事不再是一顆按鈕。** 它跟著「開始聆聽」一起開、一起關（見 renderStatus）——
+ * 少了這條，逐字稿裡就永遠沒有你自己說過的話，而那正是回答建議最需要的
+ * 上下文之一（「我剛剛才答應過什麼」）。要使用者自己記得按，等於讓一個
+ * 預設就該成立的東西變成偶爾才成立。
  */
 let recog = null;
+// 權限被拒之後不要每次 renderStatus 都再試一次 —— 那會變成錯誤訊息洗版，
+// 而且每次失敗都可能再彈一次權限詢問。
+let micBlocked = false;
 
-function stopMic() {
+function stopMic({ quiet = false } = {}) {
   if (!recog) return;
   const r = recog;
   recog = null;              // 先清掉，onend 才不會自動續接
   try { r.stop(); } catch {}
-  $('btnMic').classList.remove('on');
-  showBanner('已停止記錄你自己的發言。', 6000);
+  if (!quiet) showBanner('已停止記錄你自己的發言。', 6000);
 }
 
 function startMic() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR) { showBanner('這個瀏覽器不支援內建語音辨識，無法記錄你自己的發言。', 10000); return; }
-  if (recog) return;
+  if (recog || micBlocked) return;
 
   recog = new SR();
   recog.lang = 'zh-TW';
@@ -746,25 +789,28 @@ function startMic() {
   };
 
   recog.onerror = (e) => {
-    if (e.error === 'not-allowed') {
-      stopMic();
-      showBanner('麥克風權限被拒。請在網址列左側的鎖頭圖示裡允許此擴充功能使用麥克風。', 15000);
+    // 權限被拒是**永久性**的，不像 no-speech 那種暫時狀況。
+    // 不記下來的話，onend 會自動續接、renderStatus 也會再叫一次，
+    // 於是變成無限重試 —— 錯誤橫幅洗版，而且可能一直重彈權限詢問。
+    if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+      micBlocked = true;
+      stopMic({ quiet: true });
+      showBanner('沒有麥克風權限，所以「你自己說的話」不會進逐字稿（其他人的照常記錄）。'
+        + '要開啟的話：點網址列左側的圖示 → 允許麥克風，然後重開側邊欄。', 20000);
     } else if (e.error !== 'no-speech') {
       showBanner(`麥克風辨識錯誤：${e.error}`, 10000);
     }
   };
-  // 長時間會自動斷線，自動續接
-  recog.onend = () => { if (recog) { try { recog.start(); } catch {} } };
+  // 長時間會自動斷線，自動續接（但被拒之後不要再接）
+  recog.onend = () => { if (recog && !micBlocked) { try { recog.start(); } catch {} } };
 
   try {
     recog.start();
   } catch (err) {
     recog = null;
-    showBanner(`無法啟動麥克風：${String(err?.message || err)}`, 10000);
+    micBlocked = true;
+    showBanner(`無法啟動麥克風，「你自己說的話」不會進逐字稿：${String(err?.message || err)}`, 15000);
     return;
   }
-  $('btnMic').classList.add('on');
-  showBanner('已開始記錄你自己的發言（其他人的發言仍由分頁擷取負責）。', 10000);
+  showBanner('也會記錄你自己說的話（其他人的發言由分頁擷取負責）。', 8000);
 }
-
-$('btnMic').addEventListener('click', () => (recog ? stopMic() : startMic()));

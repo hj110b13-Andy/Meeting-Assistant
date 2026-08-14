@@ -29,11 +29,13 @@
       -->
       <button id="btnListen" class="primary" title="開始聆聽。若沒反應，請改成在會議分頁點一下工具列的會議助手圖示 —— Chrome 只接受從那裡發起的音訊擷取">▶ 開始聆聽</button>
       <!--
-        分頁擷取抓的是「分頁播放出來」的聲音，也就是**其他人**的發言。
-        你自己講的話不會經過那裡（Meet 不會把你的麥克風回放給你），
-        所以要記錄自己的發言就得另外開麥克風。
+        手動產生重點。自動摘要有兩個門檻（累積夠多段 ＋ 距上次夠久），
+        所以「我現在就想要一份」沒有別的辦法 —— 例如剛講完一個段落、
+        或是要在會議中途對齊進度的時候。
+        按下去之後自動摘要的段數與時間基準會一起重算（見 store.markSummarized），
+        不會變成「才剛手動產生完，一分鐘後又自動跑一次」。
       -->
-      <button id="btnMic" class="ghost" title="也記錄我自己說的話（分頁擷取只聽得到其他人）">🎤 我的發言</button>
+      <button id="btnSummary" class="ghost" title="立刻產生一次重點摘要。按了之後自動摘要的計時與段數會重新開始算">✦ 產生重點</button>
       <button id="btnLocal" class="ghost hidden" title="下載並啟用本機模型，完全免費且離線執行">⚡ 啟用免費模型</button>
       <button id="btnExport" class="ghost" title="複製 Markdown 逐字稿，並下載一份備份">⬇ 匯出</button>
       <button id="btnClear" class="ghost danger" title="清除本場逐字稿">✕ 清除</button>
