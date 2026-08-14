@@ -221,13 +221,19 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
       }
 
       case 'ma:keys:test': {
+        // msg.key 是設定頁輸入框裡當下那把（還沒儲存）。有就測它 ——
+        // 實際的操作順序是「貼上 → 測試 → 才儲存」，只測已存的那份會讓
+        // 剛貼完金鑰的人收到「沒有填金鑰」，而他明明看得到金鑰就在框裡。
         const keys = await getKeys();
-        // 測的是**已經存起來的**金鑰，不是畫面上打的字 —— 使用者真正會用到的
-        // 是存起來那份，測畫面上的那份可能測過了卻忘記按儲存。
-        if (msg.vendor === 'tavily') return reply?.(await testTavily(keys.tavily));
-        if (msg.vendor === 'nim2') return reply?.(await testKey('nim', keys.nvidia2));
-        if (msg.vendor === 'nim') return reply?.(await testKey('nim', keys.nvidia));
-        return reply?.(await testKey('groq', keys.groq));
+        const stored = { tavily: keys.tavily, nim2: keys.nvidia2, nim: keys.nvidia, groq: keys.groq };
+        const key = String(msg.key || stored[msg.vendor] || '').trim();
+        // noKey 讓設定頁分得出「沒有金鑰可測」與「金鑰被拒」——
+        // 兩者該給使用者的下一步完全不同。
+        if (!key) return reply?.({ ok: false, noKey: true, error: '還沒有金鑰' });
+
+        if (msg.vendor === 'tavily') return reply?.(await testTavily(key));
+        if (msg.vendor === 'nim2' || msg.vendor === 'nim') return reply?.(await testKey('nim', key));
+        return reply?.(await testKey('groq', key));
       }
 
       case 'ma:settings:set': {

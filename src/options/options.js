@@ -59,29 +59,42 @@ $('saveKeys').addEventListener('click', async () => {
 });
 
 /**
- * 測試按鈕。測的是**已經存起來的**金鑰，不是輸入框裡的字 ——
- * 使用者實際會用到的是存起來那份，測輸入框那份可能測過了卻忘記按儲存。
+ * 測試按鈕。
+ *
+ * **測的是輸入框裡當下那把**，框裡空的時候才回頭測已經存起來的。
+ *
+ * 這裡原本反過來（只測已存的），理由是「使用者真正會用到的是存起來那份」。
+ * 那個理由本身沒錯，但它忽略了實際的操作順序是**貼上 → 測試 → 才儲存** ——
+ * 於是剛貼完金鑰按測試會得到「沒有填金鑰」，而使用者明明看得到金鑰就在框裡。
+ * 那種訊息比沒有訊息更糟：它會讓人以為貼上失敗，跑去重貼或重新簽發一把新的。
  */
-function wireTest(buttonId, stateId, vendor) {
+function wireTest(buttonId, stateId, vendor, inputId) {
   $(buttonId).addEventListener('click', async () => {
     const el = $(stateId);
+    const typed = $(inputId).value.trim();
     el.className = 'keystate';
-    el.textContent = '測試中…';
-    const r = await chrome.runtime.sendMessage({ type: 'ma:keys:test', vendor });
+    el.textContent = typed ? '測試中…（測的是上面框裡這把）' : '測試中…（測已儲存的那把）';
+
+    const r = await chrome.runtime.sendMessage({ type: 'ma:keys:test', vendor, key: typed || undefined });
     if (r?.ok) {
       el.className = 'keystate ok';
-      el.textContent = `可以用 ✓（${r.ms} 毫秒${r.model ? `，${r.model}` : ''}）`;
-    } else {
-      el.className = 'keystate bad';
-      el.textContent = `不能用：${r?.error || '未知錯誤'}`;
+      el.textContent = `可以用 ✓（${r.ms} 毫秒${r.model ? `，${r.model}` : ''}）`
+        + (typed ? '　記得按下面的「儲存金鑰」' : '');
+      return;
     }
+
+    el.className = 'keystate bad';
+    // 兩邊都沒有金鑰時，講清楚該做什麼，而不是只說「沒有填金鑰」
+    el.textContent = r?.noKey
+      ? '還沒有金鑰：請在上面的欄位貼上，或先按「儲存金鑰」'
+      : `不能用：${r?.error || '未知錯誤'}`;
   });
 }
 
-wireTest('testGroq', 'groqState', 'groq');
-wireTest('testNim', 'nimState', 'nim');
-wireTest('testNim2', 'nim2State', 'nim2');
-wireTest('testTavily', 'tavilyState', 'tavily');
+wireTest('testGroq', 'groqState', 'groq', 'groq');
+wireTest('testNim', 'nimState', 'nim', 'nvidia');
+wireTest('testNim2', 'nim2State', 'nim2', 'nvidia2');
+wireTest('testTavily', 'tavilyState', 'tavily', 'tavily');
 
 $('save').addEventListener('click', async () => {
   const patch = {};

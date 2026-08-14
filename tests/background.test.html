@@ -731,6 +731,23 @@ window.store = window.__module_store;
     maskKey(secret).startsWith('gsk_FAKE') && maskKey(secret).endsWith('6789'), maskKey(secret));
   check('沒設定時顯示得出來', maskKey('') === '（未設定）');
 
+  // ── 設定頁的「測試」按鈕 ──────────────────────────────────────
+  // 實際的操作順序是「貼上 → 測試 → 才儲存」，所以要測得到**還沒存**的那把。
+  // 只測已儲存的話，剛貼完金鑰的人會收到「沒有填金鑰」，
+  // 而他明明看得到金鑰就在框裡 —— 那種訊息會讓人跑去重新簽發一把新的。
+  window.__fetches.length = 0;
+  const typedTest = await send({ type: 'ma:keys:test', vendor: 'groq', key: 'gsk_FAKEtypedbutnotsavedyet000000' });
+  check('測試用的是輸入框裡那把（還沒儲存也能測）', typedTest?.ok === true, JSON.stringify(typedTest));
+  check('真的拿那把去打 API',
+    window.__fetches.some((f) => f.headers?.Authorization === 'Bearer gsk_FAKEtypedbutnotsavedyet000000'),
+    JSON.stringify(window.__fetches.map((f) => f.headers?.Authorization)));
+
+  // 兩邊都沒有金鑰時要分得出「沒東西可測」與「金鑰被拒」——
+  // 兩者該告訴使用者的下一步完全不同
+  const nothingToTest = await send({ type: 'ma:keys:test', vendor: 'groq' });
+  check('兩邊都沒金鑰時回報 noKey，而不是含糊的錯誤',
+    nothingToTest?.ok === false && nothingToTest?.noKey === true, JSON.stringify(nothingToTest));
+
   // ── 沒有金鑰時不能解析成雲端 ──────────────────────────────────
   // 回傳 'cloud' 卻沒有金鑰的話，每一次呼叫都要先失敗一輪才退回橋接 ——
   // 使用者看到的是「每次都慢 20 秒」，而不是「你沒設定金鑰」。
@@ -751,6 +768,23 @@ window.store = window.__module_store;
     JSON.stringify({ p: withKeys?.provider, a: withKeys?.answerProvider }));
   check('雲端一樣是免費的（免費方案，不是按量計費）', withKeys?.free === true);
   check('回報金鑰已設定', withKeys?.cloudConfigured === true);
+
+  // 輸入框空著時回頭測已儲存的那把
+  window.__fetches.length = 0;
+  const storedTest = await send({ type: 'ma:keys:test', vendor: 'groq' });
+  check('輸入框空著時測已儲存的金鑰', storedTest?.ok === true, JSON.stringify(storedTest));
+  check('用的是已儲存的那把',
+    window.__fetches.some((f) => f.headers?.Authorization === 'Bearer gsk_test'),
+    JSON.stringify(window.__fetches.map((f) => f.headers?.Authorization)));
+
+  // NVIDIA 兩個帳號各測各的，不能都測到同一把
+  window.__fetches.length = 0;
+  await send({ type: 'ma:keys:test', vendor: 'nim' });
+  await send({ type: 'ma:keys:test', vendor: 'nim2' });
+  const nimAuths = window.__fetches.map((f) => f.headers?.Authorization);
+  check('NVIDIA 帳號 1 與帳號 2 分別測到各自的金鑰',
+    nimAuths.includes('Bearer nvapi-test1') && nimAuths.includes('Bearer nvapi-test2'),
+    JSON.stringify(nimAuths));
 
   // ── 送出去的請求形狀 ──────────────────────────────────────────
   window.__fetches.length = 0;
