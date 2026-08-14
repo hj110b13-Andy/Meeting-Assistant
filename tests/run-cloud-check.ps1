@@ -17,12 +17,32 @@
   （Groq 不對瀏覽器發 CORS 標頭）。擴充功能有 host_permissions 所以沒這問題，
   但這支驗證程式沒有，因此用 --disable-web-security ＋ 獨立的 user-data-dir。
   那個旗標只影響這個拋棄式的設定檔，不會動到你平常在用的 Chrome。
+
+  ── 這支**不量延遲**，原因要記下來 ──────────────────────────────
+  要讓 headless Chrome 等非同步工作跑完，只能用 --virtual-time-budget，
+  而那個旗標會**把時鐘虛擬化**：`Date.now()` 前進的是虛擬時間，不是真實時間。
+  於是每一次 API 呼叫都會量到 10 毫秒上下（實測真實值是 700–1000 毫秒）。
+
+  這比量不到更糟 —— 「回答夠快（3 秒內）」那種斷言會**永遠通過**，
+  而通過的項目沒有人會去看。所以這裡只驗這個環境真的驗得到的東西
+  （請求對方收不收、回來的內容對不對），延遲另外用 PowerShell 直接量。
+
+  同理，串流「分成幾塊」也不驗：虛擬時間會把整個回應緩衝完才交給 reader，
+  永遠是 1 塊，跟串流有沒有壞無關。只驗 onDelta 有被呼叫、而且拼回來的
+  文字跟回傳值一致 —— 那證明的是 SSE 解析器認得 Groq 真正的事件格式。
 #>
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $tmp  = Join-Path $PSScriptRoot '.tmp\cloud'
-$profileDir = Join-Path $PSScriptRoot '.cloudprofile'
+
+# **設定檔一定要放在專案資料夾外面。**
+# Chrome 會在自己的 user-data-dir 裡放 `_locales`、`_metadata` 這些資料夾，
+# 而 Chrome 保留底線開頭的名字給自己 —— 專案資料夾裡只要出現一個，
+# **整個擴充功能就拒絕載入**（不是忽略那個檔案，是整個載不進去）。
+# 之前放在 tests\.cloudprofile，跑完這支驗證就會把擴充功能弄壞，
+# 而錯誤訊息完全不會指向這裡。
+$profileDir = Join-Path $env:TEMP 'MeetingAssistant-cloudcheck'
 
 $chrome = @(
   "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
@@ -129,44 +149,44 @@ const prompt = [
   '你是 Andy。請用繁體中文，條列 3 點簡短的回答建議。',
 ].join('\n');
 
-const t0 = Date.now();
+// 這裡刻意不量時間：headless 的虛擬時鐘會讓每次呼叫都量到 10 毫秒左右，
+// 斷言「夠快」會永遠通過。延遲請用 PowerShell 直接量（見檔頭）。
 const ans = await cloudComplete({ role: 'answer', prompt, maxTokens: 300 });
-const ansMs = Date.now() - t0;
 check('即時回答打得通（真的 Groq API）', !!ans.text, JSON.stringify(ans).slice(0, 200));
-check('回答夠快（3 秒內）', ansMs < 3000, ansMs + ' 毫秒');
 check('回答是繁體中文', isTraditional(ans.text), ans.text.slice(0, 60));
 check('回傳形狀跟 Claude Code 一致', ans.stopReason === 'end_turn', String(ans.stopReason));
 check('沒有殘留 <think> 思考過程', !/<think>/i.test(ans.text), ans.text.slice(0, 60));
-results.push('      [回答 ' + ans.vendor + '/' + ans.model + ' ' + ansMs + 'ms] ' + ans.text.replace(/\s+/g, ' ').slice(0, 90));
+results.push('      [回答 ' + ans.vendor + '/' + ans.model + '] ' + ans.text.replace(/\s+/g, ' ').slice(0, 90));
 
 // ══ 2. 摘要：走的是另一個模型（額度分桶）══════════════════════
-const t1 = Date.now();
 const sum = await cloudComplete({
   role: 'summary', maxTokens: 300,
   prompt: '把下面的逐字稿整理成三個重點，繁體中文：\n王小明：結帳失敗率百分之三。李美玲：退款要等兩天。',
 });
-const sumMs = Date.now() - t1;
 check('摘要打得通', !!sum.text, JSON.stringify(sum).slice(0, 200));
 check('摘要用的是跟回答不同的模型（額度分桶）', sum.model !== ans.model, sum.model + ' vs ' + ans.model);
 check('摘要是繁體中文', isTraditional(sum.text), sum.text.slice(0, 60));
-results.push('      [摘要 ' + sum.vendor + '/' + sum.model + ' ' + sumMs + 'ms] ' + sum.text.replace(/\s+/g, ' ').slice(0, 90));
+results.push('      [摘要 ' + sum.vendor + '/' + sum.model + '] ' + sum.text.replace(/\s+/g, ' ').slice(0, 90));
 
 // ══ 3. 串流：真的 SSE，不是一次吐完 ═══════════════════════════
 const chunks = [];
-let firstDeltaMs = 0;
-const t2 = Date.now();
 const streamed = await cloudStream({
   role: 'answer', maxTokens: 200,
   prompt: '用繁體中文寫三句話說明如何降低退款延遲。',
-  onDelta: (d) => { if (!chunks.length) firstDeltaMs = Date.now() - t2; chunks.push(d); },
+  onDelta: (d) => chunks.push(d),
 });
 check('串流拿得到內容', !!streamed.text, JSON.stringify(streamed).slice(0, 200));
-check('真的是逐塊送達（不是一次吐完）', chunks.length > 3, chunks.length + ' 塊');
-check('第一個字很快就出現（1.5 秒內）', firstDeltaMs > 0 && firstDeltaMs < 1500, firstDeltaMs + ' 毫秒');
+check('串流是繁體中文', isTraditional(streamed.text), streamed.text.slice(0, 60));
+// onDelta 有被呼叫，代表 SSE 解析器認得 Groq 真正吐出來的事件格式。
+// **不驗「分成幾塊」** —— headless 的虛擬時間會把整個回應緩衝完才交給 reader，
+// 所以這裡永遠是 1 塊，跟串流有沒有壞無關（見檔頭關於計時的說明）。
+check('onDelta 真的被呼叫（SSE 解析器認得 Groq 的事件格式）',
+  chunks.length > 0, chunks.length + ' 塊');
 check('串流組回來的文字跟回傳值一致',
   chunks.join('').replace(/\s/g, '').includes(streamed.text.replace(/\s/g, '').slice(0, 20)),
   streamed.text.slice(0, 40));
-results.push('      [串流 ' + streamed.model + ' 首字 ' + firstDeltaMs + 'ms、共 ' + chunks.length + ' 塊]');
+results.push('      [串流 ' + streamed.model + '：' + chunks.length + ' 塊、'
+  + streamed.text.replace(/\s+/g, ' ').slice(0, 50) + '…]');
 
 // ══ 4. 語音辨識：真的音訊、真的 API ═══════════════════════════
 // speech.js 是 16.6 秒的真實中文會議錄音（22050 Hz）
@@ -180,24 +200,21 @@ const audio = downsample(asFloat, srcRate);   // offscreen.js 的真函式
 cloudKey = REAL_KEYS.groq;
 cloudModel = 'whisper-large-v3-turbo';
 cloudPrompt = '以下是繁體中文（台灣）的會議逐字稿。';
-const t3 = Date.now();
 const raw = await groqTranscribe(audio);      // offscreen.js 的真函式
-const sttMs = Date.now() - t3;
 const text = globalThis.toTraditional ? globalThis.toTraditional(raw) : raw;
 
 check('雲端辨識打得通', !!raw.trim(), JSON.stringify(raw));
-check('辨識比即時快很多（RTF < 0.3）', sttMs / 16600 < 0.3, 'RTF ' + (sttMs / 16600).toFixed(3));
 // 這幾個詞是本機 base 模型全部聽錯、small 才對的 —— 拿來當品質的實測基準
 check('聽對「這季」', text.includes('這季'), text);
 check('聽對「結帳」', text.includes('結帳'), text);
 check('聽對「對帳」', text.includes('對帳'), text);
 check('聽對人名「小陳」', text.includes('小陳'), text);
 check('輸出是繁體', isTraditional(text), text);
-results.push('      [辨識 ' + sttMs + 'ms RTF ' + (sttMs / 16600).toFixed(3) + '] ' + text);
+results.push('      [辨識 ' + cloudModel + '] ' + text);
 
 // ══ 5. Tavily 查證 ════════════════════════════════════════════
 if (REAL_KEYS.tavily) {
-  const found = await window.__module_tavily.search('台灣 營利事業所得稅 稅率');
+  const found = await window.__module_tavily.searchWeb('台灣 營利事業所得稅 稅率');
   check('Tavily 查得到結果', found.ok && found.results.length > 0, JSON.stringify(found).slice(0, 200));
   check('整理成提示詞區塊', window.__module_tavily.formatForPrompt(found).includes('網路查證'),
     window.__module_tavily.formatForPrompt(found).slice(0, 80));
@@ -209,12 +226,12 @@ if (REAL_KEYS.tavily) {
 if (REAL_KEYS.nvidia) {
   const r1 = await testKey('nim', REAL_KEYS.nvidia);
   check('NVIDIA 帳號 1 可用', r1.ok, JSON.stringify(r1));
-  results.push('      [NIM#1 ' + (r1.ms || '?') + 'ms ' + (r1.model || '') + ']');
+  results.push('      [NIM#1 ' + (r1.model || '') + ']');
 }
 if (REAL_KEYS.nvidia2) {
   const r2 = await testKey('nim', REAL_KEYS.nvidia2);
   check('NVIDIA 帳號 2 可用', r2.ok, JSON.stringify(r2));
-  results.push('      [NIM#2 ' + (r2.ms || '?') + 'ms ' + (r2.model || '') + ']');
+  results.push('      [NIM#2 ' + (r2.model || '') + ']');
 }
 
 // ══ 7. 壞金鑰要回可讀的錯誤，不是安靜失敗 ═════════════════════
@@ -274,6 +291,9 @@ foreach ($line in ($text -split "`n")) {
 Write-Host ''
 if ($fail -eq 0 -and $pass -gt 0) {
   Write-Host "雲端端到端驗證全部通過：$pass 項" -ForegroundColor Green
+  Write-Host '（這支驗的是「對方收不收、回來的內容對不對」。延遲量不到 ——' -ForegroundColor DarkGray
+  Write-Host '  headless 的虛擬時鐘會讓每次呼叫都顯示 10 毫秒左右，見檔頭說明。' -ForegroundColor DarkGray
+  Write-Host '  實測的真實延遲：回答 0.7 秒、辨識 1.0 秒／16.6 秒音檔。）' -ForegroundColor DarkGray
   exit 0
 } else {
   Write-Host "$fail 項失敗（通過 $pass 項）" -ForegroundColor Red

@@ -28,14 +28,19 @@ if (-not (Test-Path "$root\vendor\models\Xenova\whisper-base\onnx\decoder_model_
   exit 2
 }
 
-$profile = Join-Path $PSScriptRoot '.vendorprofile'
+# **設定檔一定要放在專案資料夾外面**，而且不能叫 $profile（那是 PowerShell 的自動變數）。
+# Chrome 會在自己的 user-data-dir 裡放 `_locales`、`_metadata` 這些資料夾，
+# 而 Chrome 保留底線開頭的名字給自己 —— 專案資料夾裡只要出現一個，
+# **整個擴充功能就拒絕載入**（不是忽略那個檔案，是整個載不進去），
+# 而錯誤訊息完全不會指向這裡。
+$profileDir = Join-Path $env:TEMP 'MeetingAssistant-vendorcheck'
 $page = 'file:///' + (Join-Path $PSScriptRoot 'vendor-whisper.html').Replace('\', '/')
 
 Write-Host '開啟 Chrome 執行離線驗證（所有 DNS 已封鎖）…' -ForegroundColor Cyan
 Start-Process -FilePath $chrome -ArgumentList @(
   '--no-first-run', '--no-default-browser-check', '--window-size=680,460', '--window-position=40,40',
   '--allow-file-access-from-files', '--host-resolver-rules="MAP * 127.0.0.1:1"',
-  "--user-data-dir=$profile", $page
+  "--user-data-dir=$profileDir", $page
 ) | Out-Null
 
 $deadline = (Get-Date).AddMinutes(6)
@@ -63,7 +68,7 @@ $reader = Join-Path $PSScriptRoot '.reader.html'
 $out = Join-Path $PSScriptRoot '.reader.out'
 Start-Process -FilePath $chrome -NoNewWindow -Wait -RedirectStandardOutput $out -RedirectStandardError "$out.err" `
   -ArgumentList @('--headless', '--dump-dom', '--virtual-time-budget=8000', '--no-first-run',
-    '--allow-file-access-from-files', "--user-data-dir=$profile",
+    '--allow-file-access-from-files', "--user-data-dir=$profileDir",
     ('file:///' + $reader.Replace('\', '/')))
 
 $m = [regex]::Match([IO.File]::ReadAllText($out), '(?s)<pre id="out">(.*?)</pre>')

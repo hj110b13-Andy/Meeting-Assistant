@@ -104,6 +104,16 @@ Chrome 保留 `_` 開頭給自己（`_metadata`、`_locales`）。資料夾裡�
 檔案或目錄，**整個擴充功能就拒絕載入** —— 不是忽略那個檔案，是整個載不進去。
 放暫存檔時要避開這個字首。
 
+**最容易忘的來源是 Chrome 自己的 user-data-dir。** 測試腳本開 headless Chrome 時
+如果把 `--user-data-dir` 指到專案裡（例如 `tests\.cloudprofile`），Chrome 會在那底下
+建 `_locales`、`_metadata` —— 於是**跑一次測試就把擴充功能弄壞了**，而錯誤訊息
+（「Cannot load extension with file or directory name _locales」）完全不會指向測試腳本。
+所有 `--user-data-dir` 一律指到 `$env:TEMP` 底下。踩過兩次：一次是暫存資料夾命名，
+一次是這個。`check-project.ps1` 會掃出來，但它只在你想起要跑的時候才幫得上忙。
+
+順帶一提，PowerShell 裡**不要把變數命名為 `$profile`** —— 那是自動變數
+（使用者設定檔的路徑）。`$args`、`$input` 同理。
+
 ### 4. whisper.cpp 打不開非 ASCII 路徑
 
 它用窄字元 Win32 API 開檔，路徑先被轉成系統 ANSI，`會議助手` 這種資料夾名會變成亂碼，
