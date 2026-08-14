@@ -75,7 +75,12 @@ window.chrome = {
   },
   tabs: {
     query: async () => [{ id: 1, windowId: 7 }],
-    captureVisibleTab: async () => 'data:image/png;base64,iVBORw0KGgo=',
+    // 記下每一次截圖的選項：走雲端要 JPEG（PNG 的整頁截圖 base64 之後會撞到
+    // 請求大小上限），走橋接才是 PNG 存檔。
+    captureVisibleTab: async (winId, opts) => {
+      window.__captures.push(opts || {});
+      return `data:image/${opts?.format || 'png'};base64,iVBORw0KGgo=`;
+    },
   },
   // 截圖要交給 Claude Code 讀檔，所以下載完成後還要查得到絕對路徑
   downloads: {
@@ -84,6 +89,7 @@ window.chrome = {
   },
 };
 window.__downloads = [];
+window.__captures = [];
 
 // Native Messaging stub：模擬 bridge\host.ps1
 //
@@ -769,6 +775,60 @@ window.store = window.__module_store;
   check('雲端一樣是免費的（免費方案，不是按量計費）', withKeys?.free === true);
   check('回報金鑰已設定', withKeys?.cloudConfigured === true);
 
+  // ── 附上會議畫面：雲端自己看得懂，不必升級到橋接 ────────────────
+  //
+  // 原本一律升級到 Claude Code，因為雲端模型看不懂圖片。實測踩到的問題是
+  // 橋接依賴 claude.exe 的**絕對路徑**，而 Claude Code 的 VS Code 擴充功能
+  // 會自動更新到新的版號資料夾 —— 舊路徑失效之後，使用者看到的是
+  // 「勾了附上會議畫面就出錯，不勾就正常」，完全聯想不到是別的軟體更新造成的。
+  // Groq 的 llama-4 看得懂圖片而且一樣免費，所以現在雲端自己處理。
+  SETTINGS.provider = 'cloud';
+  window.__fetches.length = 0;
+  window.__captures.length = 0;
+  const dlBefore = window.__downloads.length;
+  const visionBridgeBefore = window.__native.posted.length;
+  await send({ type: 'ma:ask', question: '畫面上那張圖的數字是多少？', withScreen: true });
+  await settle(); await settle(); await settle();
+
+  const visionCall = window.__fetches.find((f) => String(f.url).includes('groq')
+    && JSON.stringify(f.body?.messages || '').includes('image_url'));
+  check('附畫面時雲端自己處理，不必動用橋接',
+    !!visionCall, JSON.stringify(window.__fetches.map((f) => f.body?.model)));
+  check('用的是看得懂圖片的模型',
+    String(visionCall?.body?.model || '').includes('llama-4'), String(visionCall?.body?.model));
+  check('圖片以 base64 data URL 送出（雲端讀不到檔案路徑）',
+    JSON.stringify(visionCall?.body?.messages || '').includes('data:image/jpeg;base64,'),
+    JSON.stringify(visionCall?.body?.messages || '').slice(0, 200));
+  // PNG 的整頁截圖 base64 之後會脹到撞上請求大小上限，而失敗訊息不會
+  // 告訴你是圖片太大 —— 會議畫面是簡報和人臉，JPEG 品質 70 完全夠讀。
+  check('截圖用 JPEG 而不是 PNG（PNG 太大會撞到請求上限）',
+    window.__captures.some((c) => c.format === 'jpeg'),
+    JSON.stringify(window.__captures));
+  check('走雲端時不落地存檔（那只是多一次磁碟往返，還會塞滿下載資料夾）',
+    window.__downloads.length === dlBefore,
+    `多了 ${window.__downloads.length - dlBefore} 個檔案`);
+  check('走雲端時完全不碰橋接',
+    window.__native.posted.length === visionBridgeBefore,
+    JSON.stringify(window.__native.posted.slice(visionBridgeBefore).map((m) => m.type)));
+  // 圖片要掛在最後一則使用者訊息上 —— 那就是「這次要問的問題」。
+  // 掛在前面的話模型容易把它當成背景資料而不是要看的東西。
+  const lastMsg = (visionCall?.body?.messages || []).filter((m) => m.role === 'user').pop();
+  check('圖片掛在最後一則使用者訊息上（跟問題在一起）',
+    Array.isArray(lastMsg?.content)
+    && lastMsg.content.some((b) => b.type === 'text' && b.text.includes('畫面上那張圖'))
+    && lastMsg.content.some((b) => b.type === 'image_url'),
+    JSON.stringify(lastMsg).slice(0, 200));
+
+  // 沒勾就不該白白截圖，也不該走 vision 那條鏈（那是不同的模型與額度桶）
+  window.__fetches.length = 0;
+  window.__captures.length = 0;
+  await send({ type: 'ma:ask', question: '不用看畫面' });
+  await settle(); await settle();
+  check('沒勾附畫面時不截圖', window.__captures.length === 0, JSON.stringify(window.__captures));
+  check('沒勾附畫面時不會用到視覺模型（額度分桶，別亂花）',
+    !window.__fetches.some((f) => String(f.body?.model || '').includes('llama-4')),
+    JSON.stringify(window.__fetches.map((f) => f.body?.model)));
+
   // 輸入框空著時回頭測已儲存的那把
   window.__fetches.length = 0;
   const storedTest = await send({ type: 'ma:keys:test', vendor: 'groq' });
@@ -1036,6 +1096,36 @@ window.store = window.__module_store;
   await settle();
   check('離所有字幕都太遠時不硬掛，保留佔位標籤',
     speakerOf('a4') === '其他人（雲端辨識）', speakerOf('a4'));
+
+  // ── 不用開字幕的姓名來源：畫面上的發言指示器 ──────────────────
+  //
+  // 字幕要使用者自己在會議裡開啟，那一步很容易漏掉（也常常根本不想開），
+  // 於是整份逐字稿每一段都是「其他人」。Meet／Teams／Jitsi 都會在畫面上
+  // 標出正在說話的人，content script 讀到之後就走這條路進來。
+  await send({ type: 'ma:speaking', payload: { names: ['陳大文'], at: T + 300000 } });
+  await settle();
+  await send(heard('a6', '這段是靠畫面上的發言指示器認出來的。', T + 300500));
+  await settle();
+  check('沒有字幕也能靠發言指示器補上姓名',
+    speakerOf('a6') === '陳大文', speakerOf('a6'));
+
+  // 兩個人同時被判定在講話時沒有辦法歸屬。content script 那邊已經擋掉，
+  // 背景這裡再擋一次 —— 這條路的資料來自 DOM，不能假設它一定乾淨。
+  await send({ type: 'ma:speaking', payload: { names: ['甲', '乙'], at: T + 400000 } });
+  await settle();
+  await send(heard('a7', '這時候兩個人同時在講。', T + 400200));
+  await settle();
+  check('兩個人同時在講時不硬掛名字',
+    speakerOf('a7') === '其他人（雲端辨識）', speakerOf('a7'));
+
+  // 回報是每 1.5 秒一次的心跳，區間要往後補一段 ——
+  // 只記到「這一刻」的話，兩次心跳之間的音訊會落在區間外面而對不上。
+  await send({ type: 'ma:speaking', payload: { names: ['林小美'], at: T + 500000 } });
+  await settle();
+  await send(heard('a8', '這句話在兩次心跳之間。', T + 501200));
+  await settle();
+  check('兩次心跳之間的音訊仍然對得上',
+    speakerOf('a8') === '林小美', speakerOf('a8'));
 
   // 選擇器失效時「說話者」會抓到介面文字，那絕對不能被安到某段音訊頭上
   await send(cap('c3', 'arrow_drop_down', '展開', T + 200000, T + 200000));

@@ -323,6 +323,44 @@ check('聽對人名「小陳」', text.includes('小陳'), text);
 check('輸出是繁體', isTraditional(text), text);
 results.push('      [辨識 ' + cloudModel + '] ' + text);
 
+// ══ 4.5 視覺模型：「附上會議畫面」那條路 ══════════════════════
+//
+// 這條路原本只有 Claude Code 橋接（雲端模型看不懂圖片），但橋接依賴
+// claude.exe 的絕對路徑，Claude Code 的 VS Code 擴充功能一更新就失效 ——
+// 症狀是「勾了附上會議畫面就出錯，不勾就正常」。Groq 的 llama-4 看得懂
+// 圖片而且一樣免費，所以現在雲端自己處理。
+//
+// **模型 ID 只有打真的 API 才驗得到。** 合成測試用的是 stub，
+// 模型下架或改名時照樣全綠，而實際使用會回 404 —— 而且是在使用者
+// 正在開會、剛勾了附上會議畫面的那一刻才發現。
+{
+  // 一張 8x8 的純色 PNG 就夠驗「圖片收得下、模型答得出來」。
+  // 不用真截圖：這裡驗的是請求形狀與模型可用性，不是辨識品質。
+  const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAAI0lEQVR4nGP'
+    + '8z8DAwMDAxIAKGBmZGBgYGBiYGBkYGBgYGAAAKgAB0gAAAAASUVORK5CYII=';
+  step('打 Groq 的視覺模型（附上會議畫面用）');
+  let visionOk = false; let visionErr = ''; let visionModel = '';
+  try {
+    const r = await window.__module_cloud.cloudComplete({
+      role: 'vision',
+      maxTokens: 64,
+      temperature: 0,
+      imageDataUrl: png,
+      system: '你會看圖回答。全部使用繁體中文。',
+      messages: [{ role: 'user', content: '這張圖片主要是什麼顏色？只回答顏色。' }],
+    });
+    visionOk = !!r.text.trim();
+    visionModel = r.model;
+    results.push('      [視覺 ' + r.model + '] ' + r.text.trim().slice(0, 60));
+  } catch (err) {
+    visionErr = String(err.message || err);
+  }
+  check('視覺模型打得通（模型 ID 還在、圖片收得下）', visionOk,
+    visionErr || '（沒有回應）');
+  check('用的是免費方案的 llama-4（不是按量計費的模型）',
+    !visionOk || visionModel.includes('llama-4'), visionModel);
+}
+
 // ══ 5. Tavily 查證 ════════════════════════════════════════════
 if (REAL_KEYS.tavily) {
   step('打 Tavily 查證');

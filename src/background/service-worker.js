@@ -135,6 +135,12 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
         await onSegment(msg.payload);
         return reply?.({ ok: true });
 
+      // 「畫面上現在誰在講話」——不需要開字幕的姓名來源
+      case 'ma:speaking':
+        if (sender?.tab?.id) meetingTabId = sender.tab.id;
+        rememberSpeakingNames(msg.payload);
+        return reply?.({ ok: true });
+
       case 'ma:status': {
         // 記住會議分頁的 id。側邊欄自己查不到可靠的答案 ——
         // 它是獨立的情境，chrome.tabs.query({active:true}) 可能給到別的分頁，
@@ -146,6 +152,9 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
           captionsFound: msg.payload.captionsFound,
           platform: msg.payload.platform,
           participants: msg.payload.participants,
+          // 發言指示器有沒有找到 —— 設定頁的診斷靠這個回答
+          // 「為什麼說話者都是『其他人』」
+          speakerStrategy: msg.payload.speakerStrategy || '',
         });
         if (changed) pushState(); else broadcast('status', store.getState().status);
         return reply?.({ ok: true });
@@ -254,6 +263,22 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
       case 'ma:audio:start':
         return reply?.(await startAudioFallback(msg.streamId, msg.engine));
 
+      // 設定頁的診斷用：說話者姓名這條路現在斷在哪一環
+      case 'ma:speakerState': {
+        const status = store.getState().status || {};
+        const now = Date.now();
+        return reply?.({
+          ok: true,
+          platform: status.platform,
+          captionsFound: !!status.captionsFound,
+          speakerStrategy: status.speakerStrategy || '',
+          participants: status.participants || [],
+          recent: recentCaptionSpeakers.slice(-5).map((c) => ({
+            speaker: c.speaker, seconds: Math.round((now - c.to) / 1000),
+          })),
+        });
+      }
+
       case 'ma:stt:status':      // 設定頁用：本機原生辨識裝好了沒
         return reply?.(await sttStatus());
 
@@ -313,24 +338,49 @@ const SPEAKER_MEMORY = 24;
  */
 const SPEAKER_MATCH_MS = 6000;
 
-function rememberCaptionSpeaker(seg) {
-  const speaker = seg.speaker;
+function rememberSpeaker(speaker, from, to) {
   if (!speaker || speaker === '未標註') return;
   // 選擇器抓錯時「說話者」可能是介面文字，記進去會把它安到某段音訊頭上
   if (looksLikeChrome(speaker)) return;
 
-  const from = seg.startedAt || seg.ts || Date.now();
-  const to = Math.max(from, seg.ts || from);
   const last = recentCaptionSpeakers[recentCaptionSpeakers.length - 1];
-  // 同一個人連續講：延長區間而不是多記一筆。字幕會被串流改寫，同一句話
-  // 會定稿好幾次 —— 每次都記一筆的話 SPEAKER_MEMORY 會被一個人塞滿，
+  // 同一個人連續講：延長區間而不是多記一筆。字幕會被串流改寫、發言指示器
+  // 每 1.5 秒回報一次心跳 —— 每次都記一筆的話 SPEAKER_MEMORY 會被一個人塞滿，
   // 前面其他人的區間全部被擠掉。
   if (last && last.speaker === speaker && from - last.to < 8000) {
     last.to = Math.max(last.to, to);
     return;
   }
-  recentCaptionSpeakers.push({ speaker, from, to });
+  recentCaptionSpeakers.push({ speaker, from, to: Math.max(from, to) });
   if (recentCaptionSpeakers.length > SPEAKER_MEMORY) recentCaptionSpeakers.shift();
+}
+
+function rememberCaptionSpeaker(seg) {
+  const from = seg.startedAt || seg.ts || Date.now();
+  rememberSpeaker(seg.speaker, from, seg.ts || from);
+}
+
+/**
+ * 「畫面上顯示誰在講話」。**這條不需要使用者開字幕。**
+ *
+ * 字幕是可靠的姓名來源，但它要使用者自己在會議裡開啟 —— 那一步很容易漏掉，
+ * 也常常根本不想開，於是整份逐字稿每一段都是「其他人」。
+ * Meet／Teams／Jitsi 都會在畫面上標出正在說話的人，那個資訊本來就在，
+ * 讀它等於免費多一個姓名來源。
+ *
+ * content script 已經做過兩道過濾（名字要像名字、要對得上參與者名單、
+ * 同時兩個人在講就整個丟掉），所以這裡收到的就是可以用的。
+ *
+ * 區間的結束時間往後補一個心跳的長度：回報是每 1.5 秒一次，只記到「這一刻」
+ * 的話，兩次心跳之間的音訊會落在區間外面而對不上。
+ */
+const SPEAKING_HEARTBEAT_MS = 1500;
+
+function rememberSpeakingNames(payload) {
+  const names = Array.isArray(payload?.names) ? payload.names : [];
+  if (names.length !== 1) return;    // 兩個人同時講話時無法歸屬，寧可不記
+  const at = Number(payload.at) || Date.now();
+  rememberSpeaker(String(names[0]), at, at + SPEAKING_HEARTBEAT_MS);
 }
 
 /**
@@ -611,19 +661,38 @@ async function answerQuestion({ question, asker, manual, withScreen }) {
   let provider = limits.provider;
   let transcriptChars = limits.transcriptChars;
   let imagePath = null;
+  let imageDataUrl = null;
+  let role = 'answer';
 
   if (withScreen) {
-    // 本機模型與雲端這兩條都看不懂圖片。既然使用者明確要求看畫面，
-    // 就把這一題升級到 Claude Code（同樣免費，只是慢），
-    // 而不是回一句「我看不懂」。
-    const blind = provider === 'chrome-ai' || provider === 'cloud';
-    if (blind && await bridgeHealthy()) {
-      const was = provider;
+    // **雲端優先，橋接是退路。**
+    //
+    // 這裡原本一律把「附上會議畫面」升級到 Claude Code，因為雲端模型看不懂
+    // 圖片。實測踩到的問題是橋接比想像中脆弱：`config.json` 存的是 claude.exe
+    // 的絕對路徑，而 Claude Code 的 VS Code 擴充功能會自動更新到新的版號
+    // 資料夾，舊路徑就失效 —— 使用者看到的是「勾了附上會議畫面就出錯，
+    // 不勾就正常」，完全聯想不到是別的軟體更新造成的。
+    //
+    // Groq 的 llama-4 看得懂圖片而且一樣免費，所以現在雲端自己處理：
+    // 1 秒內回來，也不依賴本機裝了什麼。
+    if (provider === 'cloud') {
+      try {
+        // 走雲端要的是 base64 data URL（不是檔案路徑），而且用 JPEG ——
+        // PNG 的整頁截圖動輒好幾 MB，會撞到請求大小上限。
+        imageDataUrl = await captureScreenDataUrl();
+        role = 'vision';
+        broadcast('answerNote', { id, note: '正在讀取會議畫面…' });
+      } catch (err) {
+        broadcast('answerNote', { id, note: `畫面擷取失敗，只依逐字稿回答：${err.message}` });
+      }
+    } else if (provider === 'chrome-ai' && await bridgeHealthy()) {
+      // 本機模型看不懂圖片，而且沒有雲端金鑰時也沒有 llama-4 可用 ——
+      // 這時橋接仍然是唯一看得懂畫面的路。
       provider = 'claude-code';
       transcriptChars = BUDGET['claude-code'].transcript.answer;
       broadcast('answerNote', {
         id,
-        note: `${was === 'cloud' ? '雲端模型' : '本機模型'}看不懂圖片，這一題改用 Claude Code（較慢，但看得懂畫面）。`,
+        note: '本機模型看不懂圖片，這一題改用 Claude Code（較慢，但看得懂畫面）。',
       });
     }
 
@@ -634,10 +703,11 @@ async function answerQuestion({ question, asker, manual, withScreen }) {
       } catch (err) {
         broadcast('answerNote', { id, note: `畫面擷取失敗，只依逐字稿回答：${err.message}` });
       }
-    } else {
+    } else if (!imageDataUrl) {
       broadcast('answerNote', {
         id,
-        note: '目前的後端看不懂圖片，而 Claude Code 橋接未就緒（需執行 bridge\\install.ps1），只依逐字稿回答。',
+        note: '目前的後端看不懂圖片。到設定頁貼上 Groq 金鑰就能用免費的雲端視覺模型；'
+          + '或執行 bridge\\install.ps1 啟用 Claude Code 橋接。這一題只依逐字稿回答。',
       });
     }
   }
@@ -658,10 +728,15 @@ async function answerQuestion({ question, asker, manual, withScreen }) {
 
   try {
     await stream({
-      role: 'answer',
+      // role 決定候選鏈。附上畫面時要走 vision 那條（看得懂圖片的模型），
+      // 否則圖片會被送給一個看不懂它的模型 —— 不會報錯，只是被忽略。
+      role,
       provider,
       maxTokens: 1200,
+      // imagePath 給橋接（Claude Code 讀檔案），imageDataUrl 給雲端（base64）。
+      // 兩個同時是 null 就是純文字回答。
       imagePath,
+      imageDataUrl,
       effort: 'low',
       // 即時回答重點是延遲：關閉思考，靠上下文與低 effort 換速度。
       thinking: { type: 'disabled' },
@@ -723,6 +798,25 @@ async function answerQuestion({ question, asker, manual, withScreen }) {
  * chrome.downloads.download 只回傳 id，路徑得再用 search 查；而且要等
  * state 變成 complete 才保證檔案已經寫完，否則 Claude Code 可能讀到空檔。
  */
+/**
+ * 截圖成 base64 data URL，給雲端視覺模型用。
+ *
+ * 跟 captureScreenFile 的差別不只是格式：
+ *
+ *  - **用 JPEG 而不是 PNG。** 整頁截圖的 PNG 動輒好幾 MB，base64 之後再脹
+ *    三分之一，會撞到請求大小上限（而失敗訊息不會告訴你是圖片太大）。
+ *    會議畫面是簡報和人臉，JPEG 品質 70 完全夠讀。
+ *  - **不落地成檔案。** 雲端要的是 base64，存檔只是多一次磁碟往返，
+ *    而且會在使用者的下載資料夾裡累積一堆截圖。
+ */
+async function captureScreenDataUrl() {
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  if (!tab) throw new Error('找不到作用中的分頁');
+  const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 70 });
+  if (!dataUrl) throw new Error('截圖是空的');
+  return dataUrl;
+}
+
 async function captureScreenFile() {
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   if (!tab) throw new Error('找不到作用中的分頁');

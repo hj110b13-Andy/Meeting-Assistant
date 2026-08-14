@@ -270,6 +270,91 @@ check('Jitsi：句子裡的時間碼不會被誤切成說話者（舞台字幕�
     return g && g.text.includes('14:30') && !g.speaker;
   })(), '時間碼被切成說話者了');
 
+// ── 發言指示器：不用開字幕的姓名來源 ────────────────────────────
+//
+// 語音辨識完全聽不出是誰在講話，姓名原本只能靠字幕 —— 而字幕要使用者
+// 自己在會議裡開啟，那一步很容易漏掉。Meet／Teams／Jitsi 都會在畫面上
+// 標出正在說話的人，讀它等於免費多一個來源。
+//
+// **這裡驗的是選擇器與邏輯自洽，不能證明真實的 DOM 長得跟這裡一樣。**
+// 字幕選擇器就是這樣第一次寫錯的（實測抓到介面文字而不是字幕）。
+// 真實的驗證要在會議分頁的 console 跑 __MA_SPEAKER_DEBUG__()。
+{
+  const { detectSpeaking, soleName, speakingFrom, looksLikeName } = globalThis.__MA_CORE__;
+  const mk = (html) => {
+    const d = document.createElement('div');
+    d.innerHTML = html;
+    document.body.appendChild(d);
+    return d;
+  };
+
+  // 一個人的視訊磚：指示器 + 名牌
+  let box = mk(`
+    <div id="tile-a"><span class="speaking-indicator"></span><div class="displayname">Eden</div></div>
+    <div id="tile-b"><div class="displayname">Mei</div></div>`);
+  let got = detectSpeaking((el) => soleName(el, ['.displayname']), ['.speaking-indicator']);
+  check('找得到正在說話的人', got.names.length === 1 && got.names[0] === 'Eden',
+    JSON.stringify(got));
+  check('回報命中的是哪一條選擇器（診斷用）',
+    got.strategy === '.speaking-indicator', got.strategy);
+  box.remove();
+
+  // 指示器通常**永遠都在 DOM 裡**，只用樣式切換顯示。不看可見性的話
+  // 會變成「每個人都一直在講話」—— 比抓不到更糟，因為它會把名字亂掛。
+  box = mk(`
+    <div><span class="speaking-indicator" style="display:none"></span>
+      <div class="displayname">Eden</div></div>`);
+  got = detectSpeaking((el) => soleName(el, ['.displayname']), ['.speaking-indicator']);
+  check('看不見的指示器不算在講話（否則每個人都一直在講）',
+    got.names.length === 0, JSON.stringify(got));
+  box.remove();
+
+  // 往上爬找名字時最危險的一步：爬到「裝著所有人的格線」那一層，
+  // querySelector 會回**第一個人**的名字，於是所有人的話都掛到他頭上，
+  // 而且畫面上看起來完全正常。
+  box = mk(`
+    <div id="grid">
+      <div class="displayname">Eden</div>
+      <div class="displayname">Mei</div>
+      <span class="speaking-indicator"></span>
+    </div>`);
+  check('容器裡有兩個名字時不猜（避免全部掛到第一個人頭上）',
+    soleName(document.getElementById('grid'), ['.displayname']) === '',
+    soleName(document.getElementById('grid'), ['.displayname']));
+  box.remove();
+
+  // 名字要對得上參與者名單。掃屬性名稱這種找法最容易抓到介面文字 ——
+  // 字幕選擇器就踩過這個坑（把 arrow_drop_down 當成說話者）。
+  const engine = {};
+  box = mk(`<div><span class="speaking-indicator"></span><div class="displayname">Eden</div></div>`);
+  const adapter = {
+    speakingHints: ['.speaking-indicator'],
+    participants: () => ['Eden', 'Mei'],
+  };
+  check('名字在參與者名單裡才採用',
+    JSON.stringify(speakingFrom(engine, adapter, ['.displayname'])) === '["Eden"]',
+    JSON.stringify(speakingFrom(engine, adapter, ['.displayname'])));
+  check('順便把命中的選擇器記在引擎上（設定頁的診斷要用）',
+    engine.speakerStrategy === '.speaking-indicator', engine.speakerStrategy);
+  check('不在名單裡的名字整個丟掉',
+    speakingFrom(engine, { ...adapter, participants: () => ['Mei', '陳大文'] }, ['.displayname']).length === 0);
+  box.remove();
+
+  // 兩個人同時被判定在講話時，沒有辦法知道這段音訊是誰的 ——
+  // 硬選一個就是二分之一的機率掛錯，而掛錯看起來完全正常。
+  box = mk(`
+    <div><span class="speaking-indicator"></span><div class="displayname">Eden</div></div>
+    <div><span class="speaking-indicator"></span><div class="displayname">Mei</div></div>`);
+  check('兩個人同時在講就不給名字（寧可沒有，也不要掛錯）',
+    speakingFrom(engine, adapter, ['.displayname']).length === 0,
+    JSON.stringify(speakingFrom(engine, adapter, ['.displayname'])));
+  box.remove();
+
+  check('圖示名稱不會被當成人名', !looksLikeName('arrow_drop_down'));
+  check('整句話不會被當成人名', !looksLikeName('那我開始今天的報告。'));
+  check('正常的名字通得過', looksLikeName('陳大文') && looksLikeName('Eden Wang'));
+}
+
 // ── 狀態回報 ──────────────────────────────────────────────────
 const status = sent.filter((m) => m.type === 'ma:status').map((m) => m.payload);
 check('回報 Meet 已找到字幕', status.some((s) => s.platform === 'google-meet' && s.captionsFound));

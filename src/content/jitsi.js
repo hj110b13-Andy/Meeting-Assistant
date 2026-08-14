@@ -31,7 +31,9 @@
  * 字幕本身由部署端的 Jigasi 轉錄服務提供，沒裝就沒有字幕可抓。
  */
 (() => {
-  const { CaptionEngine, heuristicRoot, clean, genericParse } = globalThis.__MA_CORE__;
+  const { CaptionEngine, heuristicRoot, clean, genericParse, speakingFrom } = globalThis.__MA_CORE__;
+
+  const JITSI_NAME_SELECTORS = ['.displayname', 'span[id$="_name"]'];
 
   // 聊天面板字幕分頁的容器（實際存在於 bundle 裡的 id，不是猜的）
   const LIST_SELECTORS = ['#subtitles-messages-list', '#subtitles-messages-container'];
@@ -168,9 +170,24 @@
         .forEach((el) => { const n = clean(el.textContent); if (n && n.length < 40) names.add(n); });
       return [...names];
     },
+
+    /**
+     * Jitsi 的發言指示器。
+     *
+     * 這一家最好處理：`dominant-speaker` 是 Jitsi 開源程式碼裡的**真實 class**，
+     * 不是雜湊出來的，而且已經沿用很多年（視訊磚 `#participant_<id>` 上
+     * 會加這個 class）。所以這條命中率應該最高。
+     */
+    speakingHints: ['.dominant-speaker', '.videocontainer.dominant-speaker'],
+
+    activeSpeakers(engine) {
+      return speakingFrom(engine, adapter, JITSI_NAME_SELECTORS);
+    },
   };
 
   const engine = new CaptionEngine(adapter);
+  // 診斷用（在會議分頁的 console 跑 __MA_SPEAKER_DEBUG__()）
+  globalThis.__MA_ENGINE__ = engine;
   // parse() 需要知道目前的 root 才能往上找同組的姓名
   adapter.root = null;
   const origScan = engine.scan.bind(engine);

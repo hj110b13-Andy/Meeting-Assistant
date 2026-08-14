@@ -82,9 +82,42 @@ function Write-HostMessage($obj) {
     $stdout.Flush()
 }
 
+# ── claude.exe 不見了就自己重新找一次 ───────────────────────────
+#
+# config.json 存的是**絕對路徑**，而 Claude Code 的 VS Code 擴充功能會自動更新
+# 到新的版號資料夾（…\anthropic.claude-code-2.1.228-win32-x64\…）—— 舊資料夾
+# 被刪掉之後，config.json 裡的路徑就指向不存在的檔案。
+#
+# 這件事實測發生過，而且**每次擴充功能更新都會再發生一次**。使用者看到的是
+# 「勾了附上會議畫面就出錯，不勾就正常」，完全聯想不到是 Claude Code 更新造成的。
+# 所以這裡自己重找一次（跟 install.ps1 同樣的邏輯），找到就寫回 config.json，
+# 使用者不必為了別人的版本更新去重跑安裝腳本。
+function Resolve-ClaudeExe {
+    $candidates = @()
+    $cmd = Get-Command claude -ErrorAction SilentlyContinue
+    if ($cmd) { $candidates += $cmd.Source }
+    $extRoot = Join-Path $env:USERPROFILE '.vscode\extensions'
+    if (Test-Path $extRoot) {
+        # 版號大的排前面，取最新安裝的那份
+        $candidates += Get-ChildItem $extRoot -Directory -Filter 'anthropic.claude-code-*' -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending |
+            ForEach-Object { Join-Path $_.FullName 'resources\native-binary\claude.exe' }
+    }
+    return $candidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+}
+
 function Invoke-ClaudeCode($system, $user, $imagePath) {
     if (-not $claudeExe -or -not (Test-Path $claudeExe)) {
-        throw "找不到 claude.exe（設定值：$claudeExe）。請重新執行 bridge\install.ps1。"
+        $found = Resolve-ClaudeExe
+        if (-not $found) {
+            throw "找不到 claude.exe（設定值：$claudeExe）。請重新執行 bridge\install.ps1。"
+        }
+        $script:claudeExe = $found
+        # 寫回去，下次連線就不用再找。寫失敗不算錯誤 —— 這一次已經可以跑了。
+        try {
+            @{ claudeExe = $found; timeoutSeconds = [int]($timeoutMs / 1000) } |
+                ConvertTo-Json | Set-Content $configPath -Encoding UTF8
+        } catch { }
     }
 
     # 指令與資料全部走 stdin，-p 只放一句固定的話。

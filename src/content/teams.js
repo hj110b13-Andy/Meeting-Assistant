@@ -6,7 +6,16 @@
  * Teams 會把會議畫面放進 iframe，因此 manifest 對 Teams 使用 all_frames: true。
  */
 (() => {
-  const { CaptionEngine, heuristicRoot, clean, genericParse } = globalThis.__MA_CORE__;
+  const { CaptionEngine, heuristicRoot, clean, genericParse, speakingFrom } = globalThis.__MA_CORE__;
+
+  // Teams 的 data-tid 是他們的測試 id 慣例，比 class 穩定得多 ——
+  // 字幕那邊的選擇器也是靠它撐過好幾次改版的。
+  const TEAMS_NAME_SELECTORS = [
+    '[data-tid="participant-name"]',
+    '[data-tid="roster-participant-name"]',
+    '[id^="roster-avatar-img-"]',      // 名字在 alt／aria-label 上
+    '[data-tid="calling-participant-name"]',
+  ];
 
   // 由上而下試。最後一條是萬用比對：Teams 改版時字幕視窗的 data-tid 換過好幾次
   // （closed-caption-window → closed-caption-v2-window → …-wrapper），但那串前綴
@@ -80,7 +89,30 @@
         .forEach((el) => { const n = clean(el.textContent); if (n && n.length < 40) names.add(n); });
       return [...names];
     },
+
+    /**
+     * Teams 的發言指示器。
+     *
+     * Teams 在說話的人頭像外面畫一圈會動的音量環，並在參與者清單那一列
+     * 標出發言狀態。這些狀態幾乎都掛在 data-tid 上，所以這裡列的是
+     * data-tid 而不是 class —— 跟字幕那邊同一個理由。
+     *
+     * 全部沒中的話，core 的 SPEAKING_HINTS 會再掃一次屬性裡的 speaking 字樣。
+     */
+    speakingHints: [
+      '[data-tid="voice-level-stream-outline"]',
+      '[data-tid*="voice-level" i]',
+      '[data-tid*="speaking" i]',
+      '[data-tid="participant-speaking-indicator"]',
+    ],
+
+    activeSpeakers(engine) {
+      return speakingFrom(engine, adapter, TEAMS_NAME_SELECTORS);
+    },
   };
 
-  new CaptionEngine(adapter).start();
+  const engine = new CaptionEngine(adapter);
+  // 診斷用（在會議分頁的 console 跑 __MA_SPEAKER_DEBUG__()）
+  globalThis.__MA_ENGINE__ = engine;
+  engine.start();
 })();

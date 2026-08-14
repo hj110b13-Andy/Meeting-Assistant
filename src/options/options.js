@@ -192,9 +192,11 @@ $('save').addEventListener('click', async () => {
 $('dumpState').addEventListener('click', async () => {
   const el = $('dumpOut');
   el.textContent = '讀取中…';
-  const [s, k] = await Promise.all([
+  const [s, k, st] = await Promise.all([
     chrome.runtime.sendMessage({ type: 'ma:settings:get' }),
     chrome.runtime.sendMessage({ type: 'ma:keys:get' }),
+    // 說話者姓名為什麼沒出現，只有這裡看得到線索
+    chrome.runtime.sendMessage({ type: 'ma:speakerState' }),
   ]);
   if (!s || !k) {
     el.textContent = '背景沒有回應。最常見的原因是擴充功能剛重新載入，'
@@ -222,6 +224,28 @@ $('dumpState').addEventListener('click', async () => {
       ? '雲端免費方案（約 1 秒）' : 'Claude Code 橋接（10–30 秒）'}`,
     `網路查證：${k.present?.tavily ? '開啟（只在需要外部資料時）' : '關閉（沒有 Tavily 金鑰）'}`,
   ];
+  // ── 說話者姓名 ──
+  // 「為什麼每個人都叫其他人」是最常問的問題，而畫面上完全沒有線索：
+  // 語音辨識聽不出是誰，姓名要從會議畫面上讀 —— 讀不到的時候，
+  // 使用者看到的只是「其他人」，看不出是哪一環沒接上。
+  lines.push('', '── 說話者姓名（要開著會議分頁才有資料）──');
+  if (!st || st.ok === false) {
+    lines.push('讀不到會議分頁的狀態。請先開著會議分頁，再回來按一次。');
+  } else {
+    lines.push(`會議分頁：${st.platform || '（沒有偵測到，content script 可能沒有載入）'}`);
+    lines.push(`發言指示器：${st.speakerStrategy
+      ? `找得到（命中 ${st.speakerStrategy}）`
+      : '找不到 —— 這個版面的指示器抓不到，姓名只能靠字幕'}`);
+    lines.push(`會議字幕：${st.captionsFound ? '已開啟（會提供真實姓名）' : '沒有開啟'}`);
+    lines.push(`參與者名單：${st.participants?.length ? st.participants.join('、') : '（讀不到）'}`);
+    lines.push(`最近記到的說話者：${st.recent?.length
+      ? st.recent.map((r) => `${r.speaker}（${r.seconds} 秒前）`).join('、')
+      : '（還沒有）'}`);
+    if (!st.speakerStrategy && !st.captionsFound) {
+      lines.push('→ 兩個來源都沒有，所以逐字稿只會顯示「其他人」。在會議裡開啟字幕是最可靠的補救。');
+    }
+  }
+
   if (k.mismatched?.length) {
     lines.push('', '⚠ 看起來貼錯欄位：'
       + k.mismatched.map((m) => `「${m.label}」應該以 ${m.prefix} 開頭`).join('；'));

@@ -6,7 +6,12 @@
  * 前提：使用者需在會議中開啟字幕（右下角「⋮」→「開啟字幕」／CC 按鈕）。
  */
 (() => {
-  const { CaptionEngine, heuristicRoot, clean, genericParse } = globalThis.__MA_CORE__;
+  const { CaptionEngine, heuristicRoot, clean, genericParse, speakingFrom } = globalThis.__MA_CORE__;
+
+  // 名牌的位置。`[data-self-name]` 是自己的磚，另外兩個是別人的 ——
+  // 全部是雜湊 class，所以 soleName 才會用「這一層只有一個名字」當條件，
+  // 而不是相信任何一個名字。
+  const MEET_NAME_SELECTORS = ['[data-self-name]', 'div.zWGUib', 'div.dwSJ2e', '[class*="zWGUib"]'];
 
   // 語意選擇器排最前面。Meet 的 class name（.a4cQT、.nMcdL、.NWpY1d…）是編譯產生的，
   // 每隔幾個月就整批換掉；但字幕面板一直是個帶 aria-label 的 role="region"，
@@ -105,7 +110,31 @@
         .forEach((el) => { const n = clean(el.textContent); if (n && n.length < 40) names.add(n); });
       return [...names];
     },
+
+    /**
+     * Meet 的發言指示器。
+     *
+     * Meet 在說話者的視訊磚上顯示一組會跳動的音量條。那個元素**一直存在**，
+     * 只是靠樣式切換顯示 —— 所以 detectSpeaking 一定要看可見性，
+     * 否則會變成「每個人都一直在講話」，比抓不到更糟。
+     *
+     * 這幾個雜湊 class 是現行版本的，會被改版換掉；換掉之後 core 的
+     * SPEAKING_HINTS（掃屬性值裡的 speaking／dominant 字樣）還會接著試。
+     * 兩層都失效就是拿不到名字 —— 逐字稿照常，只是顯示「其他人」。
+     */
+    speakingHints: [
+      'div.IisKdb',            // 音量條（現行版本）
+      'div[jsname="A5il2e"]',
+      '[class*="IisKdb"]',
+    ],
+
+    activeSpeakers(engine) {
+      return speakingFrom(engine, adapter, MEET_NAME_SELECTORS);
+    },
   };
 
-  new CaptionEngine(adapter).start();
+  const engine = new CaptionEngine(adapter);
+  // 診斷用（在會議分頁的 console 跑 __MA_SPEAKER_DEBUG__()）
+  globalThis.__MA_ENGINE__ = engine;
+  engine.start();
 })();

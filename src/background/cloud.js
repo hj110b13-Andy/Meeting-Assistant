@@ -80,6 +80,22 @@ const CHAINS = {
     // 前面全部撞到額度時才值得等。
     { vendor: 'nim', model: 'meta/llama-3.3-70b-instruct', timeoutMs: 120000 },
   ],
+  /**
+   * 看得懂圖片的模型（「附上會議畫面」用）。
+   *
+   * 原本這條路只有 Claude Code 橋接：雲端模型看不懂圖片，所以勾了附畫面就
+   * 把那一題升級到橋接。實測踩到的問題是**橋接比想像中脆弱** ——
+   * `config.json` 存的是 claude.exe 的絕對路徑，而 Claude Code 的 VS Code
+   * 擴充功能會自動更新到新的版號資料夾，舊路徑就失效了。使用者看到的是
+   * 「勾了附上會議畫面就出錯，不勾就正常」，完全聯想不到是別的軟體更新造成的。
+   *
+   * Groq 的 llama-4 系列看得懂圖片，而且**一樣是免費方案**。所以現在先走雲端：
+   * 1 秒內回來，也不依賴本機裝了什麼。橋接留在最後當退路。
+   */
+  vision: [
+    { vendor: 'groq', model: 'meta-llama/llama-4-scout-17b-16e-instruct', timeoutMs: 30000 },
+    { vendor: 'groq', model: 'meta-llama/llama-4-maverick-17b-128e-instruct', timeoutMs: 30000 },
+  ],
 };
 
 const VENDOR = {
@@ -158,7 +174,7 @@ function cleanText(raw) {
  * 直接把**同一個 opts** 交給橋接重跑，兩邊形狀不一樣的話那個退路就是壞的，
  * 而且只有在雲端失敗的時候才會發現。
  */
-function toMessages({ system, messages, prompt }) {
+function toMessages({ system, messages, prompt, imageDataUrl }) {
   const systemText = Array.isArray(system)
     ? system.map((b) => b?.text || '').filter(Boolean).join('\n\n')
     : String(system || '');
@@ -177,13 +193,31 @@ function toMessages({ system, messages, prompt }) {
   } else if (prompt) {
     out.push({ role: 'user', content: String(prompt) });
   }
+
+  // 圖片掛在**最後一則使用者訊息**上，content 換成 OpenAI 的區塊陣列格式。
+  // 掛在最後一則是因為那就是「這次要問的問題」——放在前面的話，
+  // 模型容易把圖片當成背景資料而不是要看的東西。
+  if (imageDataUrl) {
+    const lastUser = [...out].reverse().find((m) => m.role === 'user');
+    if (lastUser) {
+      lastUser.content = [
+        { type: 'text', text: String(lastUser.content) },
+        { type: 'image_url', image_url: { url: imageDataUrl } },
+      ];
+    } else {
+      out.push({
+        role: 'user',
+        content: [{ type: 'image_url', image_url: { url: imageDataUrl } }],
+      });
+    }
+  }
   return out;
 }
 
-function buildBody({ system, messages, prompt, model, maxTokens, temperature, stream }) {
+function buildBody({ system, messages, prompt, imageDataUrl, model, maxTokens, temperature, stream }) {
   return {
     model,
-    messages: toMessages({ system, messages, prompt }),
+    messages: toMessages({ system, messages, prompt, imageDataUrl }),
     max_tokens: maxTokens || 800,
     temperature: temperature === undefined ? 0.3 : temperature,
     stream: !!stream,
@@ -272,7 +306,7 @@ function candidates(role, keys) {
  * 而沒有這份清單就只能猜。
  */
 export async function cloudComplete(opts = {}) {
-  const { system, messages, prompt, role = 'answer', maxTokens, temperature } = opts;
+  const { system, messages, prompt, imageDataUrl, role = 'answer', maxTokens, temperature } = opts;
   const keys = await getKeys();
   const list = candidates(role, keys);
   if (!list.length) {
@@ -286,7 +320,7 @@ export async function cloudComplete(opts = {}) {
     try {
       const text = await callOnce(
         c.url, c.key,
-        buildBody({ system, messages, prompt, model: c.model, maxTokens, temperature }),
+        buildBody({ system, messages, prompt, imageDataUrl, model: c.model, maxTokens, temperature }),
         c.timeoutMs);
       const ms = Date.now() - started;
       if (c.vendor === 'nim') nimCursor = (nimCursor + 1) % VENDOR.nim.keyFields.length;
@@ -329,7 +363,7 @@ export async function cloudComplete(opts = {}) {
  *   已經吐字 → 就地把這一段收尾回傳，不丟例外
  */
 export async function cloudStream(opts = {}) {
-  const { system, messages, prompt, role = 'answer', maxTokens, temperature, onDelta } = opts;
+  const { system, messages, prompt, imageDataUrl, role = 'answer', maxTokens, temperature, onDelta } = opts;
   const keys = await getKeys();
   const list = candidates(role, keys);
   if (!list.length) {
@@ -341,7 +375,7 @@ export async function cloudStream(opts = {}) {
   const attempts = [];
   for (const cand of list) {
     try {
-      return await streamOnce(cand, { system, messages, prompt, maxTokens, temperature, onDelta });
+      return await streamOnce(cand, { system, messages, prompt, imageDataUrl, maxTokens, temperature, onDelta });
     } catch (err) {
       if (err instanceof StreamStarted) throw err.inner;   // 已經吐字，不重試
       attempts.push({ vendor: cand.vendor, model: cand.model, error: String(err.message || err), status: err.status || 0 });
@@ -356,7 +390,7 @@ class StreamStarted extends Error {
   constructor(inner) { super('串流已開始'); this.inner = inner; }
 }
 
-async function streamOnce(c, { system, messages, prompt, maxTokens, temperature, onDelta }) {
+async function streamOnce(c, { system, messages, prompt, imageDataUrl, maxTokens, temperature, onDelta }) {
   let emitted = false;
   // full 宣告在 try 外面：catch 裡要拿它把已經收到的部分收尾回傳
   let full = '';
@@ -372,7 +406,7 @@ async function streamOnce(c, { system, messages, prompt, maxTokens, temperature,
         Accept: 'text/event-stream',
       },
       body: JSON.stringify(buildBody({
-        system, messages, prompt, model: c.model, maxTokens, temperature, stream: true,
+        system, messages, prompt, imageDataUrl, model: c.model, maxTokens, temperature, stream: true,
       })),
       signal: ctrl.signal,
     });
