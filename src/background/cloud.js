@@ -118,9 +118,16 @@ function isCooling(vendor, model, keyIndex) {
 }
 
 /**
- * 429 之後要冷卻多久。優先用伺服器給的 Retry-After（秒），
- * 沒給就用 60 秒 —— Groq 的 RPM／TPM 都是以分鐘為窗口滾動的。
- * 上限壓在 5 分鐘，免得一次暫時性的尖峰讓某個模型整場會議都被跳過。
+ * 429 之後要冷卻多久。優先用伺服器給的 Retry-After（秒），沒給就用 60 秒。
+ *
+ * 「等一下再試」之所以有意義，是因為 **Groq 的額度是持續回填的水桶，
+ * 不是每天午夜歸零**。實際跟它要標頭驗證過：每天 1000 次的桶，用掉一次
+ * 之後 `x-ratelimit-reset-requests` 回 86.4 秒（＝ 86400 ÷ 1000）；
+ * 每分鐘 12000 token 的桶，用掉 37 個之後回 185 毫秒（＝ 37 ÷ 200/秒）。
+ * 兩個都完全對得上連續回填。
+ *
+ * 所以撞到額度不必放棄整場會議，冷卻一下就會有配額。上限壓在 5 分鐘，
+ * 免得一次暫時性的尖峰讓某個模型整場都被跳過。
  */
 function noteRateLimited(vendor, model, keyIndex, retryAfter) {
   const sec = Math.min(300, Math.max(5, Number(retryAfter) || 60));
