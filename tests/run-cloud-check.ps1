@@ -133,8 +133,20 @@ window.chrome = {
 <script src="speech.js"></script>
 <script>
 const results = [];
-const check = (name, cond, detail = '') =>
+const outEl = document.getElementById('out');
+
+// **每一步都立刻寫進畫面。**
+// 這支會真的打網路，而 --dump-dom 是一次性的：只在最後才寫的話，
+// 任何一個請求卡住就只會看到「（尚未執行）」，完全看不出停在哪一步。
+// 逐步寫入之後，卡住時畫面會停在最後一個完成的動作上。
+const render = () => { outEl.textContent = results.join('\n'); };
+const step = (what) => { results.push('…    ' + what); render(); };
+const check = (name, cond, detail = '') => {
+  // 步驟標記只是進度，被它後面的結果取代掉，不留在最終報告裡
+  if (results.length && results[results.length - 1].startsWith('…')) results.pop();
   results.push((cond ? 'PASS  ' : 'FAIL  ') + name + (cond ? '' : '  ->  ' + detail));
+  render();
+};
 const isTraditional = (t) => /[繁體會議對帳這個們設進來還發應]/.test(t) && !/[这个们对帐会议应发]/.test(t);
 
 (async () => {
@@ -151,6 +163,7 @@ const prompt = [
 
 // 這裡刻意不量時間：headless 的虛擬時鐘會讓每次呼叫都量到 10 毫秒左右，
 // 斷言「夠快」會永遠通過。延遲請用 PowerShell 直接量（見檔頭）。
+step('打 Groq 的 chat completions（即時回答）');
 const ans = await cloudComplete({ role: 'answer', prompt, maxTokens: 300 });
 check('即時回答打得通（真的 Groq API）', !!ans.text, JSON.stringify(ans).slice(0, 200));
 check('回答是繁體中文', isTraditional(ans.text), ans.text.slice(0, 60));
@@ -159,6 +172,7 @@ check('沒有殘留 <think> 思考過程', !/<think>/i.test(ans.text), ans.text.
 results.push('      [回答 ' + ans.vendor + '/' + ans.model + '] ' + ans.text.replace(/\s+/g, ' ').slice(0, 90));
 
 // ══ 2. 摘要：走的是另一個模型（額度分桶）══════════════════════
+step('打 Groq 的 chat completions（摘要，另一個模型）');
 const sum = await cloudComplete({
   role: 'summary', maxTokens: 300,
   prompt: '把下面的逐字稿整理成三個重點，繁體中文：\n王小明：結帳失敗率百分之三。李美玲：退款要等兩天。',
@@ -169,6 +183,7 @@ check('摘要是繁體中文', isTraditional(sum.text), sum.text.slice(0, 60));
 results.push('      [摘要 ' + sum.vendor + '/' + sum.model + '] ' + sum.text.replace(/\s+/g, ' ').slice(0, 90));
 
 // ══ 3. 串流：真的 SSE，不是一次吐完 ═══════════════════════════
+step('打 Groq 的串流（SSE）');
 const chunks = [];
 const streamed = await cloudStream({
   role: 'answer', maxTokens: 200,
@@ -200,6 +215,7 @@ const audio = downsample(asFloat, srcRate);   // offscreen.js 的真函式
 cloudKey = REAL_KEYS.groq;
 cloudModel = 'whisper-large-v3-turbo';
 cloudPrompt = '以下是繁體中文（台灣）的會議逐字稿。';
+step('上傳 16.6 秒音訊到 Groq 辨識（這一步最久）');
 const raw = await groqTranscribe(audio);      // offscreen.js 的真函式
 const text = globalThis.toTraditional ? globalThis.toTraditional(raw) : raw;
 
@@ -214,6 +230,7 @@ results.push('      [辨識 ' + cloudModel + '] ' + text);
 
 // ══ 5. Tavily 查證 ════════════════════════════════════════════
 if (REAL_KEYS.tavily) {
+  step('打 Tavily 查證');
   const found = await window.__module_tavily.searchWeb('台灣 營利事業所得稅 稅率');
   check('Tavily 查得到結果', found.ok && found.results.length > 0, JSON.stringify(found).slice(0, 200));
   check('整理成提示詞區塊', window.__module_tavily.formatForPrompt(found).includes('網路查證'),
@@ -224,17 +241,20 @@ if (REAL_KEYS.tavily) {
 
 // ══ 6. NVIDIA NIM 備援真的可用 ════════════════════════════════
 if (REAL_KEYS.nvidia) {
+  step('打 NVIDIA NIM 帳號 1');
   const r1 = await testKey('nim', REAL_KEYS.nvidia);
   check('NVIDIA 帳號 1 可用', r1.ok, JSON.stringify(r1));
   results.push('      [NIM#1 ' + (r1.model || '') + ']');
 }
 if (REAL_KEYS.nvidia2) {
+  step('打 NVIDIA NIM 帳號 2');
   const r2 = await testKey('nim', REAL_KEYS.nvidia2);
   check('NVIDIA 帳號 2 可用', r2.ok, JSON.stringify(r2));
   results.push('      [NIM#2 ' + (r2.model || '') + ']');
 }
 
 // ══ 7. 壞金鑰要回可讀的錯誤，不是安靜失敗 ═════════════════════
+step('用一把故意寫壞的金鑰打 Groq');
 const bad = await testKey('groq', 'gsk_FAKEthiskeyisdeliberatelyinvalid00000');
 check('壞金鑰會明確失敗', bad.ok === false && !!bad.error, JSON.stringify(bad));
 check('壞金鑰的狀態碼是 401（可據以提示使用者）', bad.status === 401, String(bad.status));
@@ -243,9 +263,15 @@ check('壞金鑰的狀態碼是 401（可據以提示使用者）', bad.status =
   results.push('FAIL  測試中斷  ->  ' + (err && (err.stack || err.message || err)));
 }
 
+// 收尾。跑到這裡才寫「完成」那一行 —— 沒有這一行就代表中途卡住了，
+// PowerShell 那邊據此分辨「真的跑完」與「虛擬時間用完才被截斷」。
 const failed = results.filter((r) => r.startsWith('FAIL')).length;
-document.getElementById('out').textContent =
-  results.join('\n') + '\n---\n' + (failed === 0 ? ('全部 ' + results.filter(r=>r.startsWith('PASS')).length + ' 項通過') : (failed + ' 項失敗'));
+results.push('---');
+results.push(failed === 0
+  ? ('全部 ' + results.filter((r) => r.startsWith('PASS')).length + ' 項通過')
+  : (failed + ' 項失敗'));
+results.push('__DONE__');
+render();
 })();
 </script>
 </body></html>
@@ -258,11 +284,13 @@ $stdout = Join-Path $tmp 'out.txt'
 $stderr = Join-Path $tmp 'err.txt'
 $url = 'file:///' + ($pagePath -replace '\\', '/')
 
-Write-Host '執行中（會真的打 API，約 15–30 秒）…' -ForegroundColor DarkGray
+Write-Host '執行中（會真的打 API，約 15–60 秒）…' -ForegroundColor DarkGray
+# 預算給得寬：這支要等好幾次真實的網路來回（其中上傳 16.6 秒音訊最久），
+# 預算用完 Chrome 就直接把當下的 DOM 倒出來，看起來像「什麼都沒跑」。
 Start-Process -FilePath $chrome -NoNewWindow -Wait `
   -RedirectStandardOutput $stdout -RedirectStandardError $stderr `
   -ArgumentList @(
-    '--headless', '--dump-dom', '--virtual-time-budget=60000',
+    '--headless', '--dump-dom', '--virtual-time-budget=180000',
     '--disable-web-security', "--user-data-dir=$profileDir",
     '--no-first-run', '--no-default-browser-check', $url)
 
@@ -280,12 +308,34 @@ if (-not $m.Success) {
 }
 
 $text = [System.Net.WebUtility]::HtmlDecode($m.Groups[1].Value)
+$finished = $text -match '__DONE__'
+$text = $text -replace '__DONE__', ''
+
 $pass = 0; $fail = 0
 foreach ($line in ($text -split "`n")) {
   if     ($line -match '^PASS') { $pass++; Write-Host "  $line" -ForegroundColor DarkGreen }
   elseif ($line -match '^FAIL') { $fail++; Write-Host "  $line" -ForegroundColor Red }
   elseif ($line -match '^SKIP') { Write-Host "  $line" -ForegroundColor DarkYellow }
+  # 「…」開頭的是進度標記：只有卡在那一步時才會留下來
+  elseif ($line -match '^…')    { Write-Host "  $line  ← 卡在這一步" -ForegroundColor Yellow }
   elseif ($line.Trim())         { Write-Host "  $line" -ForegroundColor DarkGray }
+}
+
+# 沒跑完就不是「通過」，不論已經綠了幾項。
+# 舊版在這裡會印「0 項失敗（通過 0 項）」，那個訊息什麼都沒說 ——
+# 它同時可以表示「一切正常但沒有測試」與「整個卡死」。
+if (-not $finished) {
+  Write-Host ''
+  Write-Host '測試沒有跑完（頁面在中途停住，或虛擬時間預算用完就被截斷）。' -ForegroundColor Red
+  if ($pass -eq 0 -and $fail -eq 0) {
+    Write-Host '一項都沒跑到 —— 通常是連不上 API，或金鑰讀錯了。' -ForegroundColor Red
+  } else {
+    Write-Host "已完成 $pass 項，卡在上面標「←」的那一步。" -ForegroundColor Red
+  }
+  Write-Host 'Chrome 的錯誤輸出（前 15 行）：' -ForegroundColor DarkGray
+  Get-Content $stderr -TotalCount 15 -ErrorAction SilentlyContinue |
+    ForEach-Object { Write-Host "  $_" -ForegroundColor DarkGray }
+  exit 1
 }
 
 Write-Host ''
