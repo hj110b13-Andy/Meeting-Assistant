@@ -528,8 +528,18 @@ async function refreshProviderBadge() {
     info = await chrome.runtime.sendMessage({ type: 'ma:provider' });
   }
 
-  $('providerBadge').textContent = info.free ? '免費模式' : 'Claude';
-  $('providerBadge').title = `摘要：${info.label}｜即時回答：${info.answerLabel}`;
+  // 走雲端時標示出來。使用者最常問的兩件事是「現在是誰在回答」與
+  // 「為什麼今天特別慢」，徽章與它的 tooltip 就是為了直接答出這兩題。
+  $('providerBadge').textContent = info.provider === 'cloud' ? '雲端 · 免費' : (info.free ? '免費模式' : 'Claude');
+  const bits = [`摘要：${info.label}`, `即時回答：${info.answerLabel}`];
+  if (info.cloudLastUsed?.model) {
+    bits.push(`上次用：${info.cloudLastUsed.model}（${info.cloudLastUsed.ms} 毫秒）`);
+  }
+  if (info.cloudCooldown?.length) {
+    // 冷卻中代表某個模型撞到免費額度。不講的話使用者只會覺得變慢了。
+    bits.push(`冷卻中：${info.cloudCooldown.map((c) => `${c.model} 還有 ${c.secondsLeft} 秒`).join('、')}`);
+  }
+  $('providerBadge').title = bits.join('｜');
   $('providerBadge').classList.toggle('freeMode', info.free);
 
   // 跑不動就別留一顆按了只會噴錯的按鈕
@@ -537,6 +547,13 @@ async function refreshProviderBadge() {
   if (localReady) {
     $('btnLocal').textContent = '✓ 免費模型已就緒';
     $('btnLocal').classList.add('on');
+  }
+
+  // 完全沒有雲端金鑰時要主動說 —— 這時候每一項功能都在走慢很多的退路，
+  // 而畫面上唯一的差別只是「比較慢」，使用者不會聯想到是沒設定金鑰。
+  if (!info.cloudConfigured) {
+    showBanner('還沒設定雲端金鑰，目前走的是較慢的本機／橋接路線。'
+      + '到設定頁貼上 Groq 的 API 金鑰可以讓逐字稿快 8 倍、回答從 10–30 秒變成 1 秒以內（免費，不需信用卡）。', 20000);
   }
 
   if (info.needsBridge) {

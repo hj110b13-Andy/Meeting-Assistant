@@ -1,29 +1,38 @@
 /**
- * 聽會議分頁的聲音，轉成逐字稿。兩個引擎，**都在本機執行、零費用**：
+ * 聽會議分頁的聲音，轉成逐字稿。三個引擎，**都不會產生按量費用**：
  *
+ *   groq           — GroqCloud 的 whisper-large-v3-turbo。**這是預設。**
+ *                    免費方案（不需信用卡，撞到上限是回 429，不是開始計費）。
+ *                    音訊會離開這台電腦，這是唯一的取捨 —— 換來的是下面那張表。
  *   whisper-native — 本機執行的 whisper.cpp（%LOCALAPPDATA%\MeetingAssistant\whisper），
- *                    由 bridge 啟動成一台只綁 127.0.0.1 的小伺服器，音訊用 HTTP 送過去。
- *                    **零費用、資料不出這台電腦、不需金鑰**，而且用 small 模型 ——
- *                    中文準確度遠勝 WASM 那條的 base 模型。這是預設。
+ *                    由 bridge 啟動成一台只綁 127.0.0.1 的小伺服器。
+ *                    零費用、資料不出這台電腦、不需金鑰。沒有金鑰時的備援。
  *   whisper        — 瀏覽器內的 WASM（vendor/ 裡的 whisper-base + ONNX Runtime）。
- *                    不必安裝任何東西，但慢、而且中文明顯較差。原生那條不可用時的備援。
+ *                    不必安裝任何東西，但慢、而且中文明顯較差。最後的備援。
  *
- * 曾經有第三條 Deepgram（雲端、按量計費），已整個移除：這個專案只花
- * Claude Pro 訂閱的錢，留著付費路線就有誤觸的可能。
+ * 三者都拿不到真實姓名 —— 姓名只有平台字幕才有，所以字幕會拿來做姓名校正。
  *
- * 兩者都拿不到真實姓名 —— 姓名只有平台字幕才有，所以字幕會拿來做姓名校正。
+ * ── 為什麼預設從本機換成雲端 ────────────────────────────────────
+ * 同一段 16.6 秒的中文會議錄音，這台機器（i7-4720HQ、無可用 GPU）實測：
+ *
+ *   引擎                          RTF    逐字稿
+ *   Groq whisper-large-v3-turbo   0.06   全對，標點齊全
+ *   本機原生 small                0.47   大致正確
+ *   瀏覽器 WASM base              0.50   這季／結帳／對帳／小陳 全錯
+ *
+ * **快 8 倍而且一字未錯。** 本機 small 在真實會議裡的問題是它「大致正確」——
+ * 摘要與回答建議吃的是逐字稿，錯一個關鍵詞（對帳→對戰）整段推論就歪了。
  *
  * ── 分段長度是量出來的，不是猜的 ────────────────────────────────
  * whisper 的編碼器不論音檔多長都跑滿 30 秒的窗，所以**每次呼叫有固定成本**，
- * 段落越短越吃虧。這台機器（i7-4720HQ、無可用 GPU）實測 RTF：
+ * 段落越短越吃虧。本機引擎實測 RTF：
  *
  *   原生 small：6s→0.83　10s→0.54　12s→0.47　15s→0.40　20s→0.34
  *   原生 base ：6s→0.30　10s→0.20　12s→0.17　15s→0.15　20s→0.13
  *   WASM base ：3.4s→1.52（跟不上）　16.6s→0.50　31.7s→0.55
  *
- * 於是原生走 12 秒一段（延遲約 18 秒，RTF 0.47 還有兩倍餘裕），
- * WASM 走 20 秒一段。開會時 CPU 被視訊佔用會讓 RTF 上升，所以
- * 連續落後時會自動把段落拉長（見 noteDrop）。
+ * 於是原生走 12 秒一段，WASM 走 20 秒一段。雲端那條瓶頸完全不同 ——
+ * 不是算得慢，是**每分鐘只能打 20 次**，所以改用合併而不是丟棄（見 enqueue）。
  */
 
 const TARGET_RATE = 16000;
@@ -48,8 +57,29 @@ let silentWarned = false;
 const MAX_QUEUE = 1;           // 積壓超過這個就丟掉最舊的，寧可漏也不要越落後
 
 // WASM 備援那條仍然用固定間隔切段（它跑在 Worker 裡，改動風險不值得），
-// 原生那條已改成 VAD 切段，不再用這個表。
-const CHUNK_SEC_BY_ENGINE = { 'whisper-native': 12, whisper: 20 };
+// 原生與雲端那兩條已改成 VAD 切段，不再用這個表。
+const CHUNK_SEC_BY_ENGINE = { 'whisper-native': 12, whisper: 20, groq: 12 };
+
+// ── 雲端辨識的節流 ──────────────────────────────────────────────
+// Groq 免費方案對 whisper-large-v3-turbo 的限制是 **20 RPM**
+// （另有 7,200 音訊秒／小時、28,800 音訊秒／天，但那兩個對「一小時的會議
+// 產生一小時的音訊」來說綽綽有餘，真正會先撞到的是每分鐘的請求數）。
+//
+// 3,400 毫秒 ≈ 17.6 RPM，留一點餘裕給重試。
+const CLOUD_MIN_INTERVAL_MS = 3400;
+// 合併的上限。whisper 的窗是 30 秒，超過要多跑一輪 encoder，
+// 而且一段太長會讓逐字稿變成一大塊、難讀也難對上說話者。
+const CLOUD_MERGE_MAX_SEC = 28;
+let lastCloudSentAt = 0;
+let cloudTimer = null;
+let cloudKey = '';
+let cloudModel = 'whisper-large-v3-turbo';
+let cloudPrompt = '';
+let merged = 0;                // 因為節流而被合併的段數，只拿來說明用
+
+// 逐字稿上的說話者標籤。拿不到真實姓名（那只有平台字幕有），
+// 但至少要讓使用者看得出這行是哪個引擎產生的 —— 出問題時這是第一個線索。
+let speakerLabel = '其他人（本機辨識）';
 
 let mediaStream = null;
 let recorder = null;
@@ -77,7 +107,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
   if (msg?.type === 'ma:offscreen:start') {
     const opts = msg.options || {};
     let run;
-    if (msg.engine === 'whisper') run = startWhisperWasm(msg.streamId, opts);
+    if (msg.engine === 'groq') run = startGroq(msg.streamId, opts);
+    else if (msg.engine === 'whisper') run = startWhisperWasm(msg.streamId, opts);
     else run = startWhisperNative(msg.streamId, opts);
     run.then(() => reply({ ok: true }))
       .catch((err) => reply({ ok: false, error: String(err.message || err) }));
@@ -328,6 +359,25 @@ function noteDrop() {
 }
 
 function enqueue(audio, startedAt) {
+  // 雲端那條的瓶頸是「每分鐘幾次請求」，不是「算得多快」。
+  // 丟掉等於白白丟掉使用者講的話，而合併不會 —— 兩段黏起來送一次，
+  // 內容一個字都不會少，代價只是那一段的逐字稿晚幾秒出現。
+  if (engineName === 'groq') {
+    const tail = pending[pending.length - 1];
+    if (tail && tail.audio.length + audio.length <= CLOUD_MERGE_MAX_SEC * TARGET_RATE) {
+      const combined = new Float32Array(tail.audio.length + audio.length);
+      combined.set(tail.audio, 0);
+      combined.set(audio, tail.audio.length);
+      tail.audio = combined;     // startedAt 保留較早的那個，排序才不會亂
+      merged += 1;
+      pump();
+      return;
+    }
+    pending.push({ audio, startedAt });
+    pump();
+    return;
+  }
+
   pending.push({ audio, startedAt });
   while (pending.length > MAX_QUEUE) {
     pending.shift();
@@ -338,13 +388,27 @@ function enqueue(audio, startedAt) {
 
 async function pump() {
   if (busy || !pending.length || !transcribe) return;
+
+  // 雲端要自己守住每分鐘的請求數。還沒到時間就掛一個計時器等，
+  // **不要在這裡丟掉工作** —— 佇列裡的東西會在等待期間被合併（見 enqueue）。
+  if (engineName === 'groq') {
+    const wait = CLOUD_MIN_INTERVAL_MS - (Date.now() - lastCloudSentAt);
+    if (wait > 0) {
+      if (!cloudTimer) {
+        cloudTimer = setTimeout(() => { cloudTimer = null; pump(); }, wait);
+      }
+      return;
+    }
+    lastCloudSentAt = Date.now();
+  }
+
   const job = pending.shift();
   busy = true;
   try {
     const raw = await transcribe(job.audio);
     handleResult(raw, job.startedAt);
   } catch (err) {
-    notifyError(`本機辨識錯誤：${String(err.message || err)}`);
+    notifyError(`${engineName === 'groq' ? '雲端' : '本機'}辨識錯誤：${String(err.message || err)}`);
   } finally {
     busy = false;
     // 這一段處理期間可能又切了新的段落
@@ -367,7 +431,86 @@ function handleResult(raw, startedAt) {
   if (toTraditionalOn && typeof globalThis.toTraditional === 'function') {
     text = globalThis.toTraditional(text);
   }
-  emit(`${sessionId}-${Date.now().toString(36)}`, '其他人（本機辨識）', text, true, startedAt);
+  emit(`${sessionId}-${Date.now().toString(36)}`, speakerLabel, text, true, startedAt);
+}
+
+// ── 雲端 whisper（GroqCloud） ──────────────────────────────────
+/**
+ * Groq 的 whisper-large-v3-turbo。
+ *
+ * 音訊會離開這台電腦 —— 這是相對本機那條唯一的取捨，而且**必須讓使用者知道**，
+ * 所以起動時的說明會直接寫出來。換來的是 RTF 0.06（本機 small 是 0.47）
+ * 與明顯更好的中文準確度。
+ */
+async function startGroq(streamId, options) {
+  stop();
+  engineName = 'groq';
+  chunkSec = CHUNK_SEC_BY_ENGINE.groq;
+  toTraditionalOn = options.toTraditional !== false;
+  speakerLabel = '其他人（雲端辨識）';
+  cloudKey = options.groqKey || '';
+  cloudModel = options.groqSttModel || 'whisper-large-v3-turbo';
+  // 提示詞在這裡是**用來指定書寫系統**，不是用來餵詞彙的。
+  // 實測：不給提示詞會吐簡體，給一句繁體的提示詞就直接吐繁體。
+  // 仍然保留 s2t 轉換當保險 —— 提示詞的效果沒有保證，而 s2t 對已經是
+  // 繁體的文字是無害的空操作。
+  cloudPrompt = options.groqPrompt || '以下是繁體中文（台灣）的會議逐字稿。';
+  lastCloudSentAt = 0;
+
+  if (!cloudKey) throw new Error('沒有 Groq 金鑰');
+
+  const src = await captureTab(streamId);
+  transcribe = groqTranscribe;
+  startChunker(src);
+
+  const tracks = mediaStream?.getAudioTracks?.() || [];
+  const trackInfo = tracks.length
+    ? `音軌 ${tracks.length} 條（${tracks.map((t) => (t.enabled ? '啟用' : '停用')).join('、')}）`
+    : '**沒有音軌** —— 這個分頁可能沒有在播放聲音';
+  notifyNote(`雲端辨識已就緒（Groq ${cloudModel}）。${trackInfo}。`
+    + '每講完一句話（停頓約 0.7 秒）就辨識一次，通常 1 秒內回來。'
+    + '注意：這條路會把會議音訊送到 Groq 的伺服器辨識。要完全離線請改用本機引擎。');
+}
+
+async function groqTranscribe(audio) {
+  const form = new FormData();
+  form.append('file', toWavBlob(audio), 'chunk.wav');
+  form.append('model', cloudModel);
+  form.append('response_format', 'json');
+  form.append('temperature', '0');
+  // 指定語言可以省掉模型自己偵測的那一步，也避免中文被誤判成日文
+  form.append('language', 'zh');
+  if (cloudPrompt) form.append('prompt', cloudPrompt);
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 45000);
+  try {
+    const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${cloudKey}` },
+      body: form,
+      signal: ctrl.signal,
+    });
+
+    if (res.status === 429) {
+      // 撞到額度**不是**開始計費，是直接被拒。但使用者會看到逐字稿停住，
+      // 所以要講清楚是哪一種停 —— 否則看起來跟當機一樣。
+      const retry = res.headers.get('retry-after');
+      throw new Error(`Groq 免費額度暫時用完${retry ? `（約 ${retry} 秒後恢復）` : ''}`);
+    }
+    if (res.status === 401 || res.status === 403) {
+      throw new Error(`Groq 金鑰被拒（${res.status}）—— 請到設定頁確認金鑰`);
+    }
+    if (!res.ok) throw new Error(`Groq 回應 ${res.status}`);
+
+    const json = await res.json();
+    return String(json.text || '');
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error('雲端辨識逾時（45 秒）');
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // ── 本機原生 whisper.cpp（HTTP 到 127.0.0.1） ──────────────────
@@ -376,6 +519,7 @@ async function startWhisperNative(streamId, options) {
   engineName = 'whisper-native';
   chunkSec = CHUNK_SEC_BY_ENGINE['whisper-native'];
   toTraditionalOn = options.toTraditional !== false;
+  speakerLabel = '其他人（本機辨識）';
   nativeEndpoint = options.endpoint || 'http://127.0.0.1:8317/inference';
 
   const src = await captureTab(streamId);
@@ -420,6 +564,7 @@ async function startWhisperWasm(streamId, options) {
   engineName = 'whisper';
   chunkSec = CHUNK_SEC_BY_ENGINE.whisper;
   toTraditionalOn = options.toTraditional !== false;
+  speakerLabel = '其他人（本機辨識）';
 
   const src = await captureTab(streamId);
   const modelId = options.modelId || 'Xenova/whisper-base';
@@ -512,9 +657,11 @@ function stop() {
   try { worker?.terminate(); } catch {}
   try { mediaStream?.getTracks().forEach((t) => t.stop()); } catch {}
   try { audioCtx?.close(); } catch {}
+  try { cloudTimer && clearTimeout(cloudTimer); } catch {}
   recorder = null; socket = null; mediaStream = null; audioCtx = null;
   processor = null; worker = null; transcribe = null;
   pending = []; busy = false; buf = []; bufLen = 0; dropped = 0;
+  cloudTimer = null; lastCloudSentAt = 0; merged = 0;
   silentMs = 0; quietMs = 0; silentWarned = false;
   carry = new Float32Array(0);
   lastResultText = '';

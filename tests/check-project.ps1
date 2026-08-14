@@ -100,6 +100,73 @@ if ($manifest) {
   $portInBridge = ([regex]::Match([IO.File]::ReadAllText((Join-Path $root 'bridge\host.ps1')),
                    'STT_PORT\s*=\s*(\d+)')).Groups[1].Value
   Check '橋接與擴充功能用同一個埠號' ($portInBridge -eq $portInCode) "bridge=$portInBridge, ext=$portInCode"
+
+  # 程式碼裡出現的每一個外部端點都要有對應的 host permission。
+  # 少了的話 fetch 會被擋掉，而且錯誤訊息只會說 Failed to fetch ——
+  # 看起來像網路問題或金鑰問題，完全不指向 manifest。
+  # 只認**字串字面值**裡的網址。不加引號限制的話會掃到註解裡的範例
+  # （settings.js 就有一個 https://jitsi.x.com/room 用來說明輸入格式），
+  # 然後要求為一個根本不存在的網域加權限。
+  $hosts = @{}
+  foreach ($f in (Get-ChildItem (Join-Path $root 'src') -Recurse -Filter '*.js')) {
+    foreach ($m in [regex]::Matches([IO.File]::ReadAllText($f.FullName), '[''"`]https://([a-z0-9.-]+\.[a-z]{2,})/')) {
+      $hosts[$m.Groups[1].Value] = $true
+    }
+  }
+  # 會議平台的網域由 content_scripts 的 matches 涵蓋，不需要 host permission
+  $platform = @('meet.google.com', 'teams.microsoft.com', 'teams.live.com', 'meet.jit.si')
+  foreach ($h in ($hosts.Keys | Sort-Object)) {
+    if ($platform -contains $h) { continue }
+    $covered = $manifest.host_permissions | Where-Object { $_ -like "https://$h/*" -or $_ -eq 'https://*/*' }
+    Check "manifest 有 $h 的 host permission" ([bool]$covered) ($manifest.host_permissions -join ', ')
+  }
+}
+
+# ── 3b. 金鑰不能進版控 ──────────────────────────────────────────
+# 這個 repo 是公開的。金鑰只要推上去一次就等於外洩 —— 就算之後 commit
+# 刪掉，GitHub 仍保留該 blob，掃描機器人通常幾分鐘內就會撿走，
+# 只能到各家後台重新簽發。所以在能推之前先擋下來。
+Write-Host ''
+Write-Host '── 金鑰外洩防護 ──' -ForegroundColor Cyan
+$secretPatterns = @(
+  @{ Name = 'GroqCloud';  Regex = 'gsk_[A-Za-z0-9]{20,}' },
+  @{ Name = 'NVIDIA NIM'; Regex = 'nvapi-[A-Za-z0-9_\-]{20,}' },
+  @{ Name = 'Tavily';     Regex = 'tvly-[A-Za-z0-9\-]{20,}' },
+  @{ Name = 'Anthropic';  Regex = 'sk-ant-[A-Za-z0-9\-]{20,}' }
+)
+
+# 只檢查 git 追蹤中的檔案：未追蹤的（例如使用者自己的 API Key.txt）
+# 本來就不會被推上去，對它們報錯只會製造雜訊。
+$tracked = @()
+try { $tracked = & git -C $root ls-files 2>$null } catch {}
+
+if (-not $tracked) {
+  Check 'git 追蹤清單讀得到' $false '不在 git repo 裡，或 git 不可用 —— 無法檢查金鑰外洩'
+} else {
+  $leaks = @()
+  foreach ($rel in $tracked) {
+    $full = Join-Path $root $rel
+    if (-not (Test-Path $full)) { continue }
+    # 只讀文字檔，跳過圖片之類的二進位檔
+    if ($rel -match '\.(png|jpg|jpeg|gif|ico|zip|bin|exe|dll|wasm)$') { continue }
+    $text = ''
+    try { $text = [IO.File]::ReadAllText($full) } catch { continue }
+    foreach ($p in $secretPatterns) {
+      foreach ($m in [regex]::Matches($text, $p.Regex)) {
+        # 測試需要「長得像真的」的假金鑰（例如驗證遮罩不會洩漏中段），
+        # 所以約定假金鑰一律含大寫 FAKE。真的金鑰不會有這個字串，
+        # 而且這個約定是**明示**的 —— 比整個跳過 tests/ 安全，
+        # 因為除錯時最容易不小心把真金鑰貼進測試檔。
+        if ($m.Value -cmatch 'FAKE') { continue }
+        $leaks += "$rel（$($p.Name)）"
+      }
+    }
+  }
+  Check '版控裡沒有任何 API 金鑰' ($leaks.Count -eq 0) ($leaks -join '; ')
+
+  # .gitignore 要真的擋得住使用者放金鑰的那個檔案
+  $ignored = & git -C $root check-ignore 'API Key.txt' 2>$null
+  Check '「API Key.txt」被 .gitignore 擋住' ([bool]$ignored) '這個檔名沒有被忽略，貼了金鑰就會被推上去'
 }
 
 # ── 4. offscreen.html 的載入順序 ────────────────────────────────

@@ -7,6 +7,12 @@ import { getSettings, saveSettings, jitsiPatterns } from './settings.js';
 import { complete, stream, budget, describe, bridgeHealthy, BUDGET, LocalModelUnavailable } from './provider.js';
 import { bindPanelChannel, handlePanelMessage } from './localmodel.js';
 import { sttEnsure, sttStatus, sttShutdown, STT_ENDPOINT } from './whisper-native.js';
+import { getKeys, saveKeys, hasCloud, mismatchedKeys, maskKey } from './keys.js';
+import { testKey, cooldownState } from './cloud.js';
+// 刻意不用 `import { search as tavilySearch }`：測試執行器把模組攤平成全域時
+// **會把別名丟掉**，那個名字在測試環境裡就是 undefined —— 而且只有真的走到
+// 查證那條路才會炸，平常跑測試看不出來。名字直接取好，就沒有這個問題。
+import { needsSearch, searchWeb, formatForPrompt, testTavily } from './tavily.js';
 
 const ports = new Set();
 
@@ -190,6 +196,39 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
 
       case 'ma:settings:get':
         return reply?.(await getSettings());
+
+      // ── 金鑰 ────────────────────────────────────────────────
+      // **回到畫面上的一律是遮罩過的**。設定頁與側邊欄的內容會出現在
+      // 截圖、螢幕分享與錄影裡，而這個擴充功能的使用情境正好就是在分享畫面。
+      case 'ma:keys:get': {
+        const keys = await getKeys();
+        return reply?.({
+          masked: Object.fromEntries(Object.entries(keys).map(([k, v]) => [k, maskKey(v)])),
+          present: Object.fromEntries(Object.entries(keys).map(([k, v]) => [k, !!v])),
+          cloudConfigured: hasCloud(keys),
+          mismatched: mismatchedKeys(keys),
+          cooldown: cooldownState(),
+        });
+      }
+
+      case 'ma:keys:set': {
+        const next = await saveKeys(msg.patch || {});
+        return reply?.({
+          ok: true,
+          cloudConfigured: hasCloud(next),
+          mismatched: mismatchedKeys(next),
+        });
+      }
+
+      case 'ma:keys:test': {
+        const keys = await getKeys();
+        // 測的是**已經存起來的**金鑰，不是畫面上打的字 —— 使用者真正會用到的
+        // 是存起來那份，測畫面上的那份可能測過了卻忘記按儲存。
+        if (msg.vendor === 'tavily') return reply?.(await testTavily(keys.tavily));
+        if (msg.vendor === 'nim2') return reply?.(await testKey('nim', keys.nvidia2));
+        if (msg.vendor === 'nim') return reply?.(await testKey('nim', keys.nvidia));
+        return reply?.(await testKey('groq', keys.groq));
+      }
 
       case 'ma:settings:set': {
         const next = await saveSettings(msg.patch);
@@ -449,6 +488,9 @@ async function runSummary(force) {
         role: 'user',
         content: `【既有摘要】\n${previous}\n\n【新增逐字稿】\n${tail || '（無）'}`,
       }],
+      onFallback: ({ reason }) => {
+        broadcast('audioNote', { message: `摘要的雲端後端不可用（${reason}），這一次改用 Claude Code。` });
+      },
     });
 
     const parsed = limits.structuredJson ? JSON.parse(text) : parsePlainSummary(text);
@@ -519,12 +561,18 @@ async function answerQuestion({ question, asker, manual, withScreen }) {
   let imagePath = null;
 
   if (withScreen) {
-    // 本機模型看不懂圖片。既然使用者明確要求看畫面，就把這一題升級到
-    // Claude Code（同樣免費，只是慢），而不是回一句「我看不懂」。
-    if (provider === 'chrome-ai' && await bridgeHealthy()) {
+    // 本機模型與雲端這兩條都看不懂圖片。既然使用者明確要求看畫面，
+    // 就把這一題升級到 Claude Code（同樣免費，只是慢），
+    // 而不是回一句「我看不懂」。
+    const blind = provider === 'chrome-ai' || provider === 'cloud';
+    if (blind && await bridgeHealthy()) {
+      const was = provider;
       provider = 'claude-code';
       transcriptChars = BUDGET['claude-code'].transcript.answer;
-      broadcast('answerNote', { id, note: '本機模型看不懂圖片，這一題改用 Claude Code（較慢，但看得懂畫面）。' });
+      broadcast('answerNote', {
+        id,
+        note: `${was === 'cloud' ? '雲端模型' : '本機模型'}看不懂圖片，這一題改用 Claude Code（較慢，但看得懂畫面）。`,
+      });
     }
 
     if (provider === 'claude-code') {
@@ -534,11 +582,25 @@ async function answerQuestion({ question, asker, manual, withScreen }) {
       } catch (err) {
         broadcast('answerNote', { id, note: `畫面擷取失敗，只依逐字稿回答：${err.message}` });
       }
-    } else if (provider === 'chrome-ai') {
-      broadcast('answerNote', { id, note: '本機模型看不懂圖片，而 Claude Code 橋接未就緒（需執行 bridge\\install.ps1），只依逐字稿回答。' });
     } else {
-      // Claude API 看得懂圖片，但這條路的即時看畫面還沒接上，別假裝有做
-      broadcast('answerNote', { id, note: 'API 路線的即時看畫面尚未實作，只依逐字稿回答。可改用「📸 存檔給 Claude Code」。' });
+      broadcast('answerNote', {
+        id,
+        note: '目前的後端看不懂圖片，而 Claude Code 橋接未就緒（需執行 bridge\\install.ps1），只依逐字稿回答。',
+      });
+    }
+  }
+
+  // ── 需要外部事實時先查一次網路 ─────────────────────────────────
+  // 只在問題明顯指向會議之外時才查（見 tavily.js 的 needsSearch）。
+  // 每次查證多花 1–2 秒，而多數會議問題的答案就在逐字稿裡 ——
+  // 為了少數問題讓每一題都變慢，等於把這個功能的價值抵銷掉。
+  let webBlock = '';
+  if (settings.webSearch !== false && !manual && needsSearch(question)) {
+    broadcast('answerNote', { id, note: '這題看起來需要外部資料，正在查網路…' });
+    const found = await searchWeb(question);
+    webBlock = formatForPrompt(found);
+    if (!found.ok) {
+      broadcast('answerNote', { id, note: `網路查證沒有成功（${found.error}），只依逐字稿回答。` });
     }
   }
 
@@ -565,7 +627,12 @@ async function answerQuestion({ question, asker, manual, withScreen }) {
         },
         {
           type: 'text',
-          text: `【我的背景筆記】\n${settings.notes || '（無）'}\n\n【會議摘要】\n${summaryBlock}\n\n【近期逐字稿】\n${store.transcriptText({ limitChars: transcriptChars })}`,
+          text: [
+            `【我的背景筆記】\n${settings.notes || '（無）'}`,
+            `【會議摘要】\n${summaryBlock}`,
+            webBlock,
+            `【近期逐字稿】\n${store.transcriptText({ limitChars: transcriptChars })}`,
+          ].filter(Boolean).join('\n\n'),
         },
       ],
       messages: [{
@@ -577,6 +644,11 @@ async function answerQuestion({ question, asker, manual, withScreen }) {
       onDelta: (chunk) => {
         record.answer += chunk;
         broadcast('answerDelta', { id, chunk });
+      },
+      // 雲端整條斷掉時會退回 Claude Code。0.7 秒變成 10–30 秒，
+      // 不講的話使用者只會覺得「今天特別慢」，然後去懷疑自己的網路。
+      onFallback: ({ reason }) => {
+        broadcast('answerNote', { id, note: `雲端後端暫時不可用（${reason}），改用 Claude Code —— 會慢很多（10–30 秒）。` });
       },
     });
     store.updateAnswer(id, { streaming: false });
@@ -681,9 +753,20 @@ async function startAudioFallback(streamId, engineOverride) {
     return { ok: false, error: message };
   }
 
-  // 只有本機引擎。雲端那條（Deepgram）會按量計費，已整個移除 ——
-  // 使用者的要求是只花 Claude Pro 訂閱的錢，留著就有誤觸的可能。
-  const engine = engineOverride || settings.sttEngine || 'whisper-native';
+  // 三條引擎都不會產生按量費用（Groq 是免費方案、另外兩條在本機跑）。
+  // 曾經有 Deepgram 那條按量計費的，已整個移除。
+  let engine = engineOverride || settings.sttEngine || 'groq';
+
+  // 雲端要有金鑰才走得通。沒有的話**現在就退回本機**，不要等到第一段音訊
+  // 送出去才失敗 —— 那時候使用者已經在講話了，前幾句會直接掉掉，
+  // 而畫面上只會顯示「聆聽中」。
+  const keys = await getKeys();
+  let engineNote = '';
+  if (engine === 'groq' && !keys.groq) {
+    engine = 'whisper-native';
+    engineNote = '沒有設定 Groq 金鑰，改用本機辨識（較慢、中文準確度較低）。'
+      + '要用雲端辨識請到設定頁貼上 Groq 的 API 金鑰。';
+  }
 
   // **順序很重要：先讓 offscreen 把串流接走，再去啟動辨識伺服器。**
   //
@@ -701,6 +784,9 @@ async function startAudioFallback(streamId, engineOverride) {
       model: settings.sttNativeModel || 'small',
       endpoint: STT_ENDPOINT,
       toTraditional: settings.sttTraditional !== false,
+      // 金鑰只在啟動時傳一次給 offscreen，不存在那邊的持久狀態裡。
+      groqKey: keys.groq,
+      groqSttModel: settings.sttGroqModel || 'whisper-large-v3-turbo',
     },
   });
   // 收不到回覆也算失敗：offscreen 沒起來時 sendMessage 會回 undefined，
@@ -713,16 +799,20 @@ async function startAudioFallback(streamId, engineOverride) {
   }
 
   // 串流已經接住了，現在才去拉辨識伺服器。前幾段音訊會在佇列裡等它就緒。
-  let sttNote = '';
+  // 雲端那條不需要這一步（沒有要啟動的東西），所以只有本機引擎會進來。
+  let sttNote = engineNote;
+  if (engineNote) broadcast('audioNote', { message: engineNote });
   let finalEngine = engine;
   if (engine === 'whisper-native') {
     try {
       const r = await sttEnsure(settings.sttNativeModel);
-      if (!r.reused && r.startMs) sttNote = `本機辨識伺服器已啟動（載入模型 ${(r.startMs / 1000).toFixed(1)} 秒）。`;
+      // 用 += 而不是 = ：前面可能已經有一句「沒有金鑰所以退回本機」，
+      // 蓋掉的話使用者就看不到自己為什麼在用比較差的引擎。
+      if (!r.reused && r.startMs) sttNote += `本機辨識伺服器已啟動（載入模型 ${(r.startMs / 1000).toFixed(1)} 秒）。`;
     } catch (err) {
       // 原生起不來就改用瀏覽器內的 WASM。串流已經在跑，只要換掉引擎就好。
       finalEngine = 'whisper';
-      sttNote = `原生本機辨識無法啟動（${String(err.message || err)}），已改用瀏覽器內建的備援引擎 —— 一樣免費，但較慢且中文準確度較差。想要更好的結果請執行 tools\\install-whisper.ps1。`;
+      sttNote += `原生本機辨識無法啟動（${String(err.message || err)}），已改用瀏覽器內建的備援引擎 —— 一樣免費，但較慢且中文準確度較差。想要更好的結果請執行 tools\\install-whisper.ps1。`;
       broadcast('audioNote', { message: sttNote });
       await chrome.runtime.sendMessage({ type: 'ma:offscreen:engine', engine: 'whisper' });
     }

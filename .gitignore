@@ -19,7 +19,22 @@ tests/.tmp/
 # run-vendor-check.ps1 用的獨立 Chrome profile（離線驗證時建立）
 tests/.vendorprofile/
 
+# ── 金鑰，絕對不能進版控 ───────────────────────────────────────
+# 這個 repo 是公開的。金鑰一旦推上去，就算之後 commit 刪掉也已經外洩
+# （GitHub 會保留 blob，爬蟲數分鐘內就會掃到），只能到各家後台重新簽發。
+# 用萬用字元而不是單一檔名，是因為之後很可能會多幾個不同格式的檔案。
+API Key.txt
+*api*key*.txt
+*API*Key*.txt
+*.key
+.env
+.env.*
+secrets.json
+
 # ── 平台雜物 ───────────────────────────────────────────────────
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# 雲端端到端驗證用的獨立 Chrome profile
+tests/.cloudprofile/

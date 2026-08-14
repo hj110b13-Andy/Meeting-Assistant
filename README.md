@@ -1,39 +1,42 @@
 # 會議助手 — 即時逐字稿與重點
 
-> **三步就能用**：載入擴充功能 → 跑兩個安裝腳本 → 設定頁填你的名字。
+> **三步就能用**：載入擴充功能 → 設定頁貼上一把免費的 Groq 金鑰 → 填你的名字。
 > 詳見下方「[安裝](#安裝)」。這份 README 講的是「怎麼裝、怎麼運作、為什麼這樣設計」。
 
 Chrome / Edge 擴充功能。**聽你瀏覽器裡正在進行的會議**（Google Meet、
-Microsoft Teams 網頁版、Jitsi Meet），用**本機語音辨識**即時產生：
+Microsoft Teams 網頁版、Jitsi Meet），用**語音辨識**即時產生：
 
 - **逐字稿**，每段都標註說話者（顏色固定，同一人永遠同色）
 - **滾動式重點摘要**：重點、決議、待辦（含負責人）、未解問題
-- **即時回答建議**：有人點名問你時，自動給一句可以直接照唸的答案 + 2–4 個補充要點
+- **即時回答建議**：有人點名問你時，**約 1 秒內**給一句可以直接照唸的答案 + 2–4 個補充要點
 
-**全部費用就是你已經買的 Claude Pro 訂閱，沒有其他任何花費。**
-語音辨識跑在你自己的電腦上（whisper.cpp），摘要走 Claude Code 橋接（用訂閱額度），
-即時回答走 Chrome 內建模型（本機執行）。按量計費的路線已經整個從程式碼裡移除。
+**完全免費，而且不可能變成帳單。** 主力走 Groq 與 NVIDIA NIM 的免費方案 ——
+兩家都不需要信用卡，用超過就是被拒絕（HTTP 429），不會自動轉成按量計費。
+撞到額度或沒設金鑰時，會依序退到本機 whisper.cpp 與 Claude Code 橋接
+（用你已經買的 Pro 訂閱額度），**而且側邊欄一定會告訴你換了、以及為什麼**。
+綁信用卡按量計費的路線已經整個從程式碼裡移除。
 
-不需要 Node.js、不需要建置、不需要自架伺服器、不需要 API 金鑰。
+不需要 Node.js、不需要建置、不需要自架伺服器。**需要一把免費的 API 金鑰**
+（沒有也能跑，只是逐字稿慢 8 倍、回答從 1 秒變成 10–30 秒）。
 
 ### 支援的平台
 
 | 平台 | 網域 | 逐字稿來源 | 說話者姓名 |
 |---|---|---|---|
-| Google Meet | `meet.google.com` | 本機語音辨識 | 開字幕才有真名 |
-| Microsoft Teams | `teams.microsoft.com`、`teams.live.com` | 本機語音辨識 | 開字幕才有真名 |
-| Jitsi Meet | `meet.jit.si`、`*.8x8.vc`、自架站 | 本機語音辨識 | 開字幕才有真名 |
+| Google Meet | `meet.google.com` | 語音辨識 | 開字幕才有真名 |
+| Microsoft Teams | `teams.microsoft.com`、`teams.live.com` | 語音辨識 | 開字幕才有真名 |
+| Jitsi Meet | `meet.jit.si`、`*.8x8.vc`、自架站 | 語音辨識 | 開字幕才有真名 |
 
-**逐字稿一律來自本機語音辨識，不再依賴平台字幕。** 這個預設在真實會議實測後反過來了：
-Meet 的字幕斷斷續續、常常整段抓不到，而本機 whisper 完整得多。字幕唯一的優勢是
-**帶真實姓名**（whisper 只有聲音，拿不到），所以退成「誰在講話」的資料源 ——
+**逐字稿一律來自語音辨識，不依賴平台字幕。** 這個預設在真實會議實測後反過來了：
+Meet 的字幕斷斷續續、常常整段抓不到，而語音辨識完整得多。字幕唯一的優勢是
+**帶真實姓名**（辨識只有聲音，拿不到），所以退成「誰在講話」的資料源 ——
 有開字幕時會自動用說話時間比對，把真名補到辨識出來的段落上。
 
-沒開字幕也能用，只是說話者會顯示成「其他人（本機辨識）」。
+沒開字幕也能用，只是說話者會顯示成「其他人（雲端辨識）」。
 
 Teams 的字幕在 iframe 裡，所以那個平台用 `all_frames: true`。
 
-**三個平台的總花費都只有你已經買的 Claude Pro 訂閱** —— 沒有 API 金鑰、沒有語音辨識服務費用。
+**三個平台都不會產生任何按量費用。**
 
 **Jitsi 有兩件事跟另兩個平台不同：**
 
@@ -55,9 +58,9 @@ Teams 的字幕在 iframe 裡，所以那個平台用 `all_frames: true`。
 >
 > 也就是說**公開的 meet.jit.si 預設沒有字幕**（`inviteJigasiOnBackendTranscribing` 暗示轉錄由後端決定，應該只給付費／JaaS 租戶）。
 > 自架站則要部署端裝了 **Jigasi** 才有字幕。
-> **但這完全不影響使用**：逐字稿本來就來自本機 Whisper 聽分頁的聲音，
+> **但這完全不影響使用**：逐字稿本來就來自語音辨識聽分頁的聲音，
 > 字幕只是拿來補說話者姓名。沒字幕的 Jitsi 一樣有完整逐字稿，
-> 只是說話者顯示成「其他人（本機辨識）」。
+> 只是說話者顯示成「其他人（雲端辨識）」。
 >
 > 判斷某個 Jitsi 站有沒有字幕，最快的方法是查它的 config：
 >
@@ -65,28 +68,70 @@ Teams 的字幕在 iframe 裡，所以那個平台用 `all_frames: true`。
 > (Invoke-WebRequest "https://網域/config.js" -UseBasicParsing).Content -split "`n" | Select-String 'transcri|subtitle'
 > ```
 
-## 全部免費：兩個後端，都不按量計費
+## 全部免費，而且不可能變成帳單
 
 逐字稿、說話者標註、搜尋、匯出**完全不碰任何模型**。只有「摘要」和「回答建議」
-需要模型，而**兩個後端都是免費的**：
+需要模型，而**每一條路都是免費的**：
 
-| 用途 | 後端 | 速度 | 費用 |
+| 用途 | 主力 | 實測速度 | 費用 |
 |---|---|---|---|
-| **摘要** | Claude Code 橋接 | 10–30 秒 | 免費（吃 Claude Pro 訂閱額度） |
-| **即時回答** | Chrome 內建模型（Gemini Nano） | 1–3 秒 | 免費（本機執行） |
-| **逐字稿** | 本機 whisper.cpp | 延遲約 15 秒 | 免費（本機執行） |
+| **逐字稿** | Groq `whisper-large-v3-turbo` | RTF 0.06（16.6 秒音檔約 1 秒） | 免費方案 |
+| **即時回答** | Groq `llama-3.3-70b-versatile` | **0.7 秒** | 免費方案 |
+| **摘要** | Groq `openai/gpt-oss-120b` | 0.7 秒 | 免費方案 |
+| **查證**（選用） | Tavily | 1–2 秒 | 免費方案 |
 
-**這個組合是寫死的，設定頁不再提供選擇。** 分工的理由是延遲需求不同：
-摘要可以慢，換最好的品質；被點名時要秒回，10–30 秒的後端在那裡沒有意義。
+撞到額度或沒設金鑰時會自動往下退，**而且側邊欄會告訴你為什麼**：
+
+```
+Groq 主力模型 → Groq 備用模型 → NVIDIA NIM（兩個帳號輪流）→ Claude Code 橋接
+逐字稿：Groq → 本機 whisper.cpp small → 瀏覽器內 WASM whisper base
+```
+
+> **「免費方案」是什麼意思？**
+> Groq、NVIDIA NIM、Tavily 三家都**不需要信用卡，也不會自動轉成按量計費**：
+> 用超過就是回 HTTP 429 被拒，不是開始扣錢。這跟「綁了卡就一直扣」的
+> API 完全不同，所以才符合這個專案的前提。
 
 > ⚠️ **Claude Pro／Max 訂閱不含 API 額度。** 訂閱和 API 是分開計費的兩套東西，
 > 擴充功能**無法**直接用訂閱額度呼叫 API。「Claude Code 橋接」是唯一能動用訂閱的方式 ——
-> 它呼叫的是你本機的 CLI，不是 API。
+> 它呼叫的是你本機的 CLI，不是 API。橋接每次呼叫都是一個完整的 CLI session，
+> 所以要 10–30 秒；它現在的角色是**最後的退路**，不是主力。
 
 **按量計費的路線已經整個移除**，不只是預設關閉：`src/background/claude.js`
 （Claude API 用戶端）與 Deepgram 引擎都已刪除，`manifest.json` 也不再要求
 `api.anthropic.com` 的權限。背景測試有一項迴歸測試守著這件事 ——
 硬塞 `provider='claude'` 也不會生效。留著付費路線就有誤觸的可能。
+
+### 免費額度（2026-08 查證）
+
+| 服務 | 限制 | 一場一小時的會議會用掉多少 |
+|---|---|---|
+| Groq `whisper-large-v3-turbo` | 20 次/分、7,200 音訊秒/時、28,800 音訊秒/天 | 3,600 音訊秒（額度的 1/8） |
+| Groq `llama-3.3-70b-versatile` | 30 次/分、1,000 次/天、100,000 token/天 | 看被點名幾次，通常個位數次 |
+| NVIDIA NIM | 約 40 次/分，額度綁帳號 | 只在 Groq 撞牆時才用到 |
+| Tavily | 每月固定查詢點數 | 通常個位數次（只在需要外部資料時查） |
+
+**Groq 的額度是「每個模型一個桶」**，所以辨識、摘要、回答刻意用三個不同模型 ——
+等於把可用額度變成三份，而且摘要吃掉的 token 不會排擠到「被點名要秒回」。
+
+### API 金鑰怎麼設定
+
+到設定頁（`chrome://extensions` → 這個擴充功能 → 詳細資料 → 擴充功能選項）
+貼上金鑰，按「儲存金鑰」。每一欄旁邊都有「測試」按鈕，會直接打一次 API 確認。
+
+| 服務 | 申請 | 必要性 |
+|---|---|---|
+| **GroqCloud** | <https://console.groq.com/keys> | **最重要**，沒有它逐字稿慢 8 倍、回答慢 15–40 倍 |
+| NVIDIA NIM | <https://build.nvidia.com/> | 選用，Groq 撞到額度時的備援。可以填兩個帳號輪流用 |
+| Tavily | <https://app.tavily.com/> | 選用，只影響「需要查網路才答得出來」的問題 |
+
+> 🔒 **金鑰只存在你這台電腦的瀏覽器裡**（`chrome.storage.local`），
+> 不會上傳、也不會進入 GitHub。這個 repo 是公開的，所以金鑰絕對不放在程式碼裡；
+> `tests\check-project.ps1` 有一道檢查會掃描版控中的所有檔案，
+> 發現金鑰樣式就讓測試失敗。**換一台電腦要重新貼一次。**
+
+**要完全離線？** 不填 Groq 金鑰就好 —— 會自動退回本機 whisper.cpp，
+音訊完全不離開這台電腦，代價是慢且中文準確度較低。側邊欄會說明現在走的是哪條路。
 
 **⚠️ Gemini Nano 有硬體門檻**：顯示記憶體要 4GB 以上、Chrome 設定檔所在磁碟要
 22GB 以上可用空間、Windows 10/11、非計量網路。達不到的機器會自動把即時回答
@@ -98,23 +143,41 @@ Teams 的字幕在 iframe 裡，所以那個平台用 `all_frames: true`。
 （`claude -p --allowedTools Read`）—— 影像沒有經過 API，所以不計費，
 代價是多一次工具往返（實測 10–17 秒 vs 純文字 4.6 秒）。
 
-### 本機語音辨識（逐字稿的來源）
+### 語音辨識（逐字稿的來源）
 
-逐字稿一律由本機語音辨識產生，聽的是**分頁的聲音**（所有參與者）：
+逐字稿由語音辨識產生，聽的是**分頁的聲音**（所有參與者）：
 
-| 抓到誰 | 延遲 | 引擎 | 說話者標註 |
-|---|---|---|---|
-| **所有人**（包含你自己） | 約 15 秒 | 本機 whisper.cpp small（離線） | 有字幕就補真名，否則「其他人（本機辨識）」 |
+| 引擎 | RTF | 延遲 | 中文品質 | 何時用 |
+|---|---|---|---|---|
+| **Groq `whisper-large-v3-turbo`** | **0.06** | 講完一句後約 1–2 秒 | 16.6 秒樣本**一字未錯** | 預設（有 Groq 金鑰時） |
+| 本機 whisper.cpp small | 0.47 | 約 15 秒 | 大致正確 | 沒有金鑰／要完全離線 |
+| 瀏覽器內 WASM base | 0.50 | 約 25 秒 | 這季／結帳／對帳／小陳 **全錯** | 最後的退路 |
+
+說話者標註：三者都拿不到真名（那只有平台字幕有），有字幕就補真名，
+否則標成「其他人（雲端辨識）」或「其他人（本機辨識）」。
 
 `tabCapture` 抓的是分頁送到喇叭的聲音，所以**所有參與者都收得到**，
 不需要另外開麥克風（早期版本有一顆「🎤 我的麥克風」按鈕，已移除：
 分頁聲音本來就包含所有人，兩邊都收只會讓同一句話重複記錄）。
 
+> **雲端辨識會把會議音訊送到 Groq 的伺服器。** 這是相對本機那條唯一的取捨，
+> 側邊欄在啟動時會明講。不接受的話就別填 Groq 金鑰，會自動走本機引擎。
+
+#### 雲端辨識的節流：合併，不是丟掉
+
+Groq 免費方案對辨識是 **20 次/分**，所以瓶頸是「每分鐘幾次請求」而不是「算得多快」。
+本機那條積壓時會**丟掉最舊的**（寧可漏也不要越落後），雲端這條**完全相反**：
+把相鄰的段落**合併**成一次送出。丟掉等於白白丟掉你講的話，合併不會少一個字，
+代價只是那段逐字稿晚幾秒出現。節流間隔 3.4 秒（≈17.6 次/分，留餘裕給重試），
+合併上限 28 秒（超過 whisper 的 30 秒窗要多跑一輪 encoder，而且一段太長很難讀）。
+
 > **第一次啟動要先授權。** Chrome 要求擴充功能「已被該分頁叫用過」才給音訊串流，
 > 所以進會議後要**在會議分頁點一次工具列的擴充功能圖示**。沒點的話側邊欄會出現
 > 明確的提示，不會安靜地不動。
 
-#### 安裝（建議）
+#### 安裝本機引擎（選用，當退路）
+
+有 Groq 金鑰的話這一步可以跳過 —— 但裝了才有「網路斷了／額度用完」時的退路。
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\install-whisper.ps1
@@ -198,21 +261,24 @@ powershell -ExecutionPolicy Bypass -File bridge\install.ps1 -ExtensionId <你的
 1. 開啟 `chrome://extensions`（Edge 是 `edge://extensions`）
 2. 右上角開啟「開發人員模式」
 3. 點「載入未封裝項目」，選擇這個資料夾 `d:\Claude\會議助手`
-4. 在設定裡填「我的名字／稱呼」與「背景筆記」——這兩項直接決定回答建議的品質
+4. **到設定頁貼上 Groq 的 API 金鑰**（<https://console.groq.com/keys>，免費、不需信用卡），
+   按「儲存金鑰」再按「測試」確認。這一步影響最大 ——
+   沒有它逐字稿慢 8 倍、回答從 1 秒變成 10–30 秒
+5. 同一頁填「我的名字／稱呼」與「背景筆記」——這兩項直接決定回答建議的品質
 
-然後跑兩個安裝腳本（兩個都必要，全部免費）：
+以上就能用了。下面兩個安裝腳本是**選用的退路**，裝了才有「網路斷了／額度用完」時的備援：
 
 ```powershell
-# ① Claude Code 橋接（摘要要用，也負責啟動辨識伺服器）
+# ① Claude Code 橋接（雲端不可用時的摘要與回答退路，也負責啟動本機辨識伺服器）
 #    擴充功能 ID 在 chrome://extensions 的卡片上
 powershell -ExecutionPolicy Bypass -File bridge\install.ps1 -ExtensionId <你的擴充功能ID>
 
-# ② 本機語音辨識（逐字稿的來源，約 260 MB）
+# ② 本機語音辨識（雲端不可用時的逐字稿退路，約 260 MB）
 powershell -ExecutionPolicy Bypass -File tools\install-whisper.ps1
 ```
 
-**不需要任何 API 金鑰。** 設定頁裡也沒有可以填金鑰的地方 —— 按量計費的路線
-已經整個從程式碼裡移除。
+**完全不想用雲端？** 跳過第 4 步，只跑上面兩個腳本 —— 一切都在本機執行，
+音訊不離開這台電腦，代價是慢且中文準確度較低。側邊欄會說明現在走的是哪條路。
 
 ### 換一台電腦：從 clone 到能用
 
@@ -233,7 +299,9 @@ powershell -ExecutionPolicy Bypass -File tools\install-whisper.ps1
 powershell -ExecutionPolicy Bypass -File bridge\install.ps1 -ExtensionId <剛抄的ID>
 ```
 
-**④ 填兩個欄位**：側邊欄的 ⚙ → 「我的名字／稱呼」與「我的背景筆記」。名字空白的話自動回答幾乎不會觸發。
+**④ 貼上 API 金鑰**：設定頁 → 「API 金鑰」→ 至少貼上 **Groq** 那一把 → 按「儲存金鑰」→ 按「測試」確認。**這一步影響最大**：沒有它逐字稿慢 8 倍、回答從 1 秒變成 10–30 秒。金鑰不在 git 裡（這個 repo 是公開的），所以每一台都要自己貼。
+
+**⑤ 填兩個欄位**：設定頁的「我的名字／稱呼」與「我的背景筆記」。名字空白的話自動回答幾乎不會觸發。
 
 順序不能顛倒：**③ 一定要在 ② 之後**，因為擴充功能 ID 要先載入才拿得到。
 
@@ -241,6 +309,7 @@ powershell -ExecutionPolicy Bypass -File bridge\install.ps1 -ExtensionId <剛抄
 
 | 東西 | 為什麼不跟著 git 走 |
 |---|---|
+| **API 金鑰** | **這個 repo 是公開的。** 金鑰推上去一次就等於外洩 —— 就算之後 commit 刪掉，GitHub 仍保留那個 blob，掃描機器人幾分鐘內就會撿走，只能重新簽發。所以金鑰只存在該台瀏覽器的 `chrome.storage.local` |
 | `bridge/config.json`、`bridge/manifest.json` | 帶著該台電腦上 `claude.exe` 的絕對路徑與擴充功能 ID。**擴充功能 ID 由資料夾路徑決定**，換一台就變，所以只能各自產生 |
 | 原生語音辨識（約 260 MB） | 裝在該台的 `%LOCALAPPDATA%\MeetingAssistant\whisper`。**必須是純 ASCII 路徑**，見上方 whisper.cpp 的說明 |
 | `vendor/`（99 MB） | WASM 備援引擎，沒進版控。裝了原生的就用不到；真的要的話跑 `tools\fetch-vendor.ps1` |
@@ -271,7 +340,17 @@ git commit -m "說明改了什麼、以及為什麼"
 git push
 ```
 
-`check-project.ps1` 特別重要：它抓的是**測試跑得過、但擴充功能根本載不進去**的那類問題（少了 UTF-8 BOM、`.bat` 變成 LF、底線開頭的檔名、埠號對不上）。這些在 Windows 上很容易不小心引入，而症狀都不會指向真正的原因。
+動到雲端請求形狀（`cloud.js`、`tavily.js`、`offscreen.js` 的 `groqTranscribe`）時，還要多跑一支：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tests\run-cloud-check.ps1
+```
+
+它用**真金鑰打真 API**（讀根目錄的 `API Key.txt`，或環境變數 `GROQ_API_KEY` 等）。
+這跟上面兩支驗的是**不同的事** —— 請求形狀寫錯時 stub 照樣會回應，
+只有真的打過去才會被拒。因為需要網路與金鑰、而且會消耗免費額度，所以不放進 `run.ps1`。
+
+`check-project.ps1` 特別重要：它抓的是**測試跑得過、但擴充功能根本載不進去**的那類問題（少了 UTF-8 BOM、`.bat` 變成 LF、底線開頭的檔名、埠號對不上、manifest 少了新端點的 host permission）。這些在 Windows 上很容易不小心引入，而症狀都不會指向真正的原因。它同時是**金鑰外洩的最後一道防線**：會掃描所有 git 追蹤中的檔案，發現金鑰樣式就直接讓測試失敗。
 
 專案的慣例與地雷寫在 **[`CLAUDE.md`](CLAUDE.md)** —— Claude Code 會自動讀那個檔案，所以在任何一台電腦上開始工作前不必特別交代。
 
@@ -428,9 +507,25 @@ Meet 與 Teams 的字幕 DOM 都不是公開 API，名字每隔幾個月換一�
 - Teams 選擇器 — [Zerg00s/Live-Captions-Saver](https://github.com/Zerg00s/Live-Captions-Saver)（`teams-captions-saver/content_script.js` 的 `SELECTORS`）
 - Meet 的語意選擇器策略 — [S Anand, *Google Meet Captions as a Local Transcript Recorder*](https://www.s-anand.net/blog/google-meet-captions-local-transcript-recorder/)
 
-### 兩個後端的用法
+### 各個後端的用法
 
-**Claude Code 橋接（摘要）** —— 透過 Native Messaging 呼叫本機 `claude.exe`：
+**雲端（主力）** —— Groq 與 NVIDIA NIM，兩家都是 OpenAI 相容的介面：
+
+- 一條**候選鏈**，前面失敗（429／5xx／逾時）就換下一個。全部失敗才丟
+  `CloudUnavailable`，由 `provider.js` 決定要不要退回 Claude Code ——
+  **而且退了一定會在側邊欄講出來**（0.7 秒變成 10–30 秒，不講的話
+  使用者只會覺得「今天特別慢」，然後去懷疑自己的網路）
+- 撞到 429 會**記住冷卻時間**（優先用伺服器給的 `Retry-After`，沒給就 60 秒）。
+  不記的話下一次呼叫又會從鏈的最前面開始撞，每次都白花一個來回
+- NVIDIA 的兩把金鑰**輪流用**（額度綁帳號），把「單一帳號撞上限」往後推
+- 即時回答走 **SSE 串流**：被點名時「開始看到字」比「拿到完整答案」重要得多
+- 推理模型的 `<think>` 段落會被切掉（`gpt-oss`、`qwen` 會吐）。沒切的話
+  側邊欄會顯示一大段英文思考過程，使用者得自己在裡面找答案
+- **回傳形狀刻意跟 `ccComplete` 一致**（`{ text, stopReason }`），
+  因為退回橋接時是把**同一個 opts** 直接交過去 —— 形狀不一樣的話
+  那個退路是壞的，而且只有在雲端失敗的時候才會被發現
+
+**Claude Code 橋接（最後的退路）** —— 透過 Native Messaging 呼叫本機 `claude.exe`：
 
 - 用 `claude -p`（print 模式）一次問一次答，每次呼叫都是一個完整的 CLI session
 - **不用 JSON schema**：CLI 不保證結構化輸出，改成要求固定前綴的純文字
@@ -442,7 +537,9 @@ Meet 與 Teams 的字幕 DOM 都不是公開 API，名字每隔幾個月換一�
 - service worker 沒有 `LanguageModel`，所以推論**委派給側邊欄執行**，
   背景只負責把請求送過去、把串流結果收回來
 - context 只有幾千 token，塞整場逐字稿會被截斷，所以 `provider.js` 的
-  `BUDGET` 幫每個後端各自設了逐字稿字數上限（Nano 1500/2500，Claude Code 6000/12000）
+  `BUDGET` 幫每個後端各自設了逐字稿字數上限（Nano 1500/2500、Claude Code 6000/12000、
+  雲端 8000/16000）。雲端那個上限**不是模型的極限**（llama-3.3-70b 有 128k），
+  是「不要在一場會議裡把一整天的 token 額度花光」
 - 側邊欄關著就沒地方跑 —— 那時即時回答會安靜跳過，不噴錯誤
 
 摘要是**累積式更新**：每次只把「新增的逐字稿」送給模型，不重送整場，
@@ -457,47 +554,54 @@ Meet 與 Teams 的字幕 DOM 都不是公開 API，名字每隔幾個月換一�
    *Extension has not been invoked for the current page*。側邊欄會給出可行動的說明，
    但這一步無法自動化 —— 那是 Chrome 的權限設計。
 
-2. **本機語音辨識有延遲，而且拿不到姓名。** 逐字稿約 15 秒才出現（見上方為什麼），
-   沒開字幕時說話者只能標「其他人（本機辨識）」。開會時 CPU 被視訊佔用可能跟不上，
-   此時會略過片段、自動拉長分段並告知。
-   原生引擎有兩個外部條件：要跑過 `tools\install-whisper.ps1`，而且**要跑過
+2. **語音辨識拿不到姓名。** 三個引擎都一樣 —— 姓名只有平台字幕有，
+   所以沒開字幕時說話者只能標「其他人（雲端辨識）」或「其他人（本機辨識）」。
+   雲端辨識延遲約 1–2 秒；退到本機時約 15 秒，而且開會時 CPU 被視訊佔用可能跟不上，
+   此時會略過片段並告知。
+   本機原生引擎有兩個外部條件：要跑過 `tools\install-whisper.ps1`，而且**要跑過
    `bridge\install.ps1`** —— 伺服器是由 bridge 啟動的，擴充功能自己不能執行本機程序。
    兩者缺一就會退到 WASM 備援（會明確告知）。
 
-3. **中文準確度比不上雲端服務。** 商用工具（Meeting Ink、SeaMeet）用雲端大模型，
-   那是真的要算錢的算力。本機 whisper small 已經是免費能拿到最好的，但仍有差距 ——
-   這是「只花 Claude Pro 訂閱」的必然代價。
+3. **雲端辨識會把會議音訊送到 Groq 的伺服器。** 這是它比本機快 8 倍、準得多的代價。
+   不接受的話不要填 Groq 金鑰，就會自動走完全離線的本機引擎。
+   免費額度也有上限（28,800 音訊秒/天 ≈ 8 小時會議），用完會退回本機並說明。
 
-4. **免費模型有硬性能力上限。** Chrome 內建的 Gemini Nano 的 context 只有幾千 token
+4. **退到本機時中文準確度會明顯下降。** 主力（Groq `whisper-large-v3-turbo`）
+   實測 16.6 秒樣本一字未錯；退到本機 `small` 只是「大致正確」，
+   再退到 WASM `base` 則會把「這季／結帳／對帳／小陳」全聽錯。
+   摘要與回答建議吃的是逐字稿，**錯一個關鍵詞整段推論就歪了** ——
+   所以側邊欄在退路上會明講現在用的是哪一個引擎。
+
+5. **免費模型有硬性能力上限。** Chrome 內建的 Gemini Nano 的 context 只有幾千 token
    （所以回答只帶最近約 1500 字逐字稿）、**不支援圖片**，中文判斷品質與 Claude 有明顯差距。
    看不懂圖片這件事是用**升級**處理的，不是降級：勾了「附上會議畫面」時**那一題會自動
    改走 Claude Code**（`stream({ provider })` 蓋掉預設判斷），並在卡片上說明換了後端。
 
-5. **免費模型跑在側邊欄，不是背景。** 因為首次下載必須由使用者手勢觸發，
+6. **免費模型跑在側邊欄，不是背景。** 因為首次下載必須由使用者手勢觸發，
    而 service worker 沒有手勢。實務影響：**側邊欄關著時即時回答會安靜跳過**
    （不會噴錯）。摘要走 Claude Code，不受這個限制。
 
-6. **本機推論會吃資源，而且不是每台機器跑得動。** whisper small 常駐約 400 MB，
+7. **本機推論會吃資源，而且不是每台機器跑得動。** whisper small 常駐約 400 MB，
    8GB RAM 的機器上 Meet 開視訊本身就佔 1–2GB，疊起來可能造成頓挫。
    Gemini Nano 要求 4GB 以上顯示記憶體與 22GB 以上可用磁碟（例：GTX 960M 只有
    2GB VRAM 就直接不符），此時 `resolveProvider` 會把即時回答改判給 Claude Code ——
    於是那台機器上**唯一的回答路線也變成 10–30 秒**。
 
-7. **Claude Code 橋接會吃 Pro 的用量額度，而且不便宜。** 它每次呼叫都是一個完整的
+8. **Claude Code 橋接會吃 Pro 的用量額度，而且不便宜。** 它每次呼叫都是一個完整的
    Claude Code session，帶著 CLI 自己的系統提示，所以單次消耗遠大於同樣內容的 API 呼叫。
    **摘要間隔設太短會很快撞到 Pro 的用量上限**，預設 5 分鐘，建議不要低於 3 分鐘。
    另外要知道：Claude Code 是開發工具，把它當成應用程式的後端並不是它的設計用途 ——
    個人自用可行，但它比 API 脆弱（CLI 更新可能改變輸出格式），也沒有服務等級保證。
 
-8. **橋接綁定擴充功能 ID。** 未封裝擴充功能的 ID 由資料夾路徑決定，
+9. **橋接綁定擴充功能 ID。** 未封裝擴充功能的 ID 由資料夾路徑決定，
    **搬動資料夾會讓 ID 改變**，橋接就會失效，要重新跑一次 `install.ps1`。
 
-9. **自動回答只在「有人點名你」時觸發**，避免每個問句都燒額度。判斷依據是設定裡的
+10. **自動回答只在「有人點名你」時觸發**，避免每個問句都燒額度。判斷依據是設定裡的
    「我的名字」，或「請問／想請／你覺得／你認為／你這邊／麻煩你／交給你／由你」
    這類直接稱呼。**名字沒填的話自動回答等於沒作用** —— 想針對任何問題都拿建議，
    就手動在問答分頁輸入。
 
-10. **字幕選擇器仍然脆弱。** Meet 的 DOM 每幾個月改一次，實測就遇過整組失效。
+11. **字幕選擇器仍然脆弱。** Meet 的 DOM 每幾個月改一次，實測就遇過整組失效。
     現在字幕只影響「說話者姓名」，失效不會讓逐字稿消失，但真名會變回
     「其他人（本機辨識）」。
 
@@ -510,22 +614,24 @@ powershell -ExecutionPolicy Bypass -File tests\check-project.ps1  # 專案一致
 
 `check-project.ps1` 抓的是「行為測試跑得過、但東西還是壞的」那一類問題：`.ps1` 有沒有 UTF-8 BOM、`host.bat` 是不是 CRLF、`manifest.json` 提到的檔案存不存在、**橋接與擴充功能用的埠號有沒有對上**（不對上時 `fetch` 只會說 `Failed to fetch`）、`offscreen.html` 的腳本載入順序、以及 `src/` 下每個 `.js` 的語法。
 
-這個專案沒有 Node/npm，所以直接把 **Chrome 當測試執行環境**：每個測試頁把 `chrome.*` API 換成 stub，載入**真正的原始碼**（不是複本），再用 `--headless --dump-dom` 把結果讀回來。目前 **256 項檢查**，分六組：
+這個專案沒有 Node/npm，所以直接把 **Chrome 當測試執行環境**：每個測試頁把 `chrome.*` API 換成 stub，載入**真正的原始碼**（不是複本），再用 `--headless --dump-dom` 把結果讀回來。目前 **324 項行為測試 + 61 項專案檢查**，分六組：
 
 | 測試組 | 內容 |
 |---|---|
 | 字幕擷取引擎 | 用合成的 Meet / Teams / Jitsi 字幕 DOM 驅動引擎：串流改寫合併、視窗滑動、定稿時機、換人講話、節點重用，以及**已知選擇器全部失效時的退路**（Meet 靠 `role="region"`＋結構、Teams 靠 `data-tid*=` 與 `data-caption-id`） |
 | 逐字稿狀態 | 定稿去重、partial 生命週期、重整分頁不清空、換會議要清空、**照說話時間插入**、摘要排程（AND 門檻與失敗退避）、Markdown 匯出 |
 | 側邊欄 UI | 載入**真正的** `panel.html` + `panel.js`，餵一份逼真的 state，檢查逐字稿／重點／問答三個分頁、搜尋高亮、串流增量、未讀徽章、錯誤橫幅、無字幕等待期 |
-| 背景邏輯 | 把 `fetch` 與 Native Messaging 換成 stub：提問偵測、SSE 串流解析（含事件被切在 chunk 邊界）、請求形狀、結構化摘要、錯誤中文化、附畫面時的後端升級、**原生辨識啟動失敗自動退到 WASM**、設定遷移 |
-| 音訊處理 | 重疊去重、靜音門檻、降取樣、**WAV 編碼**、**跟不上時丟最舊的並自動拉長分段**、原生引擎的 HTTP 請求形狀 |
+| 背景邏輯 | 把 `fetch` 與 Native Messaging 換成 stub：提問偵測、SSE 串流解析（含事件被切在 chunk 邊界）、請求形狀、結構化摘要、錯誤中文化、附畫面時的後端升級、**原生辨識啟動失敗自動退到 WASM**、設定遷移、**雲端候選鏈與 429 退避**、**金鑰遮罩與貼錯欄位偵測**、**沒有金鑰時不解析成雲端**、Tavily 的查證判斷 |
+| 音訊處理 | 重疊去重、靜音門檻、降取樣、**WAV 編碼**、本機跟不上時丟最舊的、**雲端積壓時改成合併而不是丟棄**、兩種引擎的 HTTP 請求形狀、額度／金鑰錯誤的訊息可讀性 |
 | 簡繁轉換 | 實測會議句子、一對多字（发→發／髮、干→乾／幹）、台灣用字、繁體輸入不被弄壞、冪等性、邊界 |
 
 引擎測試把 `setInterval` 和 `Date.now` 換成可控的假時鐘，所以整個擷取流程是**同步、確定性**地跑完，不靠 sleep 等待。
 
 **這些測試證明什麼、不證明什麼**：合成 DOM 驗證的是「選擇器與引擎邏輯自洽」，**不能**證明真實的 Meet DOM 長得跟合成的一樣 —— 那只有真實會議能驗證。同理，`fetch` 是 stub，所以驗證的是「請求形狀正確、回應處理正確」，不是伺服器真的會回什麼。
 
-**本機辨識另外有一份真的端對端驗證**（不在 `run.ps1` 裡，因為它需要真的裝好 whisper.cpp）：實際啟動 `bridge\host.bat`、走真正的 Native Messaging 協定發 `sttStart`、確認伺服器真的在 8317 監聽、用真實瀏覽器把一段 12 秒音訊經 `toWavBlob` 編碼後 POST 到 `/inference`、驗證回來的文字經 `s2t.js` 轉成繁體，最後確認 `sttStop` 與「Chrome 斷線」都會真的把伺服器收掉。這一段驗證的是單元測試碰不到的部分：WAV 編碼器產出的檔案 whisper-server 真的讀得懂、以及伺服器不會變成 400 MB 的常駐幽靈。
+**雲端那條有一份真的端對端驗證**（`tests\run-cloud-check.ps1`，不在 `run.ps1` 裡，因為需要金鑰、網路，而且會消耗免費額度）：用**真金鑰打真 API**，驗證回答／摘要／串流／語音辨識四條路都通、回來的是繁體中文、摘要與回答真的用不同模型、串流真的是逐塊送達、以及**壞金鑰會回 401 而不是安靜失敗**。語音辨識那一項用的是專案裡那段 16.6 秒的真實中文錄音，斷言「這季／結帳／對帳／小陳」四個詞都要聽對 —— 那正是本機 `base` 模型全部聽錯的四個詞。這跟上面的 stub 測試驗的是不同的事：請求形狀寫錯時 stub 照樣會回應，只有真的打過去才會被拒。
+
+**本機辨識另外有一份真的端對端驗證**（同樣不在 `run.ps1` 裡，因為它需要真的裝好 whisper.cpp）：實際啟動 `bridge\host.bat`、走真正的 Native Messaging 協定發 `sttStart`、確認伺服器真的在 8317 監聽、用真實瀏覽器把一段 12 秒音訊經 `toWavBlob` 編碼後 POST 到 `/inference`、驗證回來的文字經 `s2t.js` 轉成繁體，最後確認 `sttStop` 與「Chrome 斷線」都會真的把伺服器收掉。這一段驗證的是單元測試碰不到的部分：WAV 編碼器產出的檔案 whisper-server 真的讀得懂、以及伺服器不會變成 400 MB 的常駐幽靈。
 
 `tests\.tmp\` 是執行時產生的暫存目錄，可以隨時刪除。
 
@@ -537,7 +643,7 @@ src/content/core.js           字幕擷取引擎（平台無關）：合併、�
 src/content/meet.js           Google Meet 選擇器
 src/content/teams.js          Teams 選擇器
 src/content/jitsi.js          Jitsi Meet 選擇器 + 「名字: 內容」切分
-src/offscreen/offscreen.js    音訊擷取 + 分段 + 兩個本機引擎的排程
+src/offscreen/offscreen.js    音訊擷取 + VAD 切段 + 三個引擎的排程（含雲端節流與合併）
 src/offscreen/whisper-worker.js  WASM 備援引擎（跑在 Worker，主執行緒才收得到音訊）
 src/lib/s2t.js                簡體→繁體轉換（本機辨識輸出用）
 src/lib/s2t-table.js          對照表（自動產生，勿手改）
@@ -550,7 +656,10 @@ tests/run-vendor-check.ps1    封鎖 DNS 驗證離線可用
 src/background/service-worker.js  訊息路由、摘要排程、提問偵測、問答、存檔
 src/background/store.js       逐字稿狀態、照說話時間插入、持久化、Markdown 匯出
 src/background/settings.js    設定的單一來源 + 後端自動判定 + 一次性遷移
-src/background/provider.js    模型後端切換層（Chrome 內建 / Claude Code，都免費）
+src/background/provider.js    模型後端切換層（雲端 / Claude Code / Chrome 內建，都免費）
+src/background/keys.js        雲端金鑰的儲存、遮罩、貼錯欄位偵測（與 settings 分開存）
+src/background/cloud.js       Groq／NVIDIA NIM 用戶端：候選鏈、雙帳號輪替、429 冷卻、SSE 串流
+src/background/tavily.js      網路查證（只在問題指向會議之外時才呼叫）
 src/background/localmodel.js  Chrome 內建模型：把推論委派給側邊欄
 src/background/claudecode.js  Claude Code 後端（Native Messaging，用 Pro 額度）
 src/background/whisper-native.js  原生辨識伺服器的啟動與生命週期（另開一條 native 連線）
@@ -559,8 +668,10 @@ bridge/install.ps1            註冊橋接 + 自我測試（-Uninstall 可移除
 src/sidepanel/                側邊欄 UI
 src/options/                  設定頁
 tests/run.ps1                 測試執行器（用 headless Chrome 跑）
-tests/check-project.ps1       專案一致性檢查（編碼、manifest、埠號、JS 語法）
+tests/check-project.ps1       專案一致性檢查（編碼、manifest、埠號、JS 語法、金鑰外洩）
+tests/run-cloud-check.ps1     雲端端到端驗證（真金鑰打真 API，選用）
 tests/*.test.html             六組測試頁
+API Key.txt                   你自己的金鑰備忘（已被 .gitignore 擋住，不會進版控）
 ```
 
 > **擴充功能資料夾裡不能有底線開頭的檔名或資料夾。** Chrome 保留 `_` 開頭給自己用（`_metadata`、`_locales`），

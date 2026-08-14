@@ -1,12 +1,13 @@
 /**
  * 設定頁。
  *
- * 刻意只留三個欄位：名字、背景筆記、自架 Jitsi 網域。後端、模型、辨識引擎、
- * 摘要頻率全部寫死在 settings.js —— 每多一個開關就多一種設錯的方式，
+ * 刻意只留必要欄位：金鑰、名字、背景筆記、自架 Jitsi 網域。後端、模型、
+ * 辨識引擎全部寫死在 settings.js —— 每多一個開關就多一種設錯的方式，
  * 而設錯的症狀（變慢、品質變差、安靜地不動）使用者根本看不出是設定造成的。
  */
 const $ = (id) => document.getElementById(id);
 const FIELDS = ['myNames', 'notes', 'jitsiDomains'];
+const KEY_FIELDS = ['groq', 'nvidia', 'nvidia2', 'tavily'];
 
 async function load() {
   const s = await chrome.runtime.sendMessage({ type: 'ma:settings:get' });
@@ -14,7 +15,73 @@ async function load() {
   $('summaryEverySegments').value = s.summaryEverySegments;
   // 內部存毫秒，介面用秒 —— 使用者不必數 0
   $('summaryEverySeconds').value = Math.round(s.summaryEveryMs / 1000);
+  await loadKeys();
 }
+
+/**
+ * 金鑰的現況。
+ *
+ * **不把金鑰本身填回輸入框**，只顯示遮罩過的摘要 —— 這個頁面會出現在
+ * 截圖與螢幕分享裡。輸入框留空代表「不修改」，填了才會覆蓋，
+ * 所以使用者可以只改其中一把而不必重貼全部。
+ */
+async function loadKeys() {
+  const r = await chrome.runtime.sendMessage({ type: 'ma:keys:get' });
+  if (!r) return;
+  const names = { groq: 'Groq', nvidia: 'NVIDIA 1', nvidia2: 'NVIDIA 2', tavily: 'Tavily' };
+  const parts = KEY_FIELDS.map((f) => `${names[f]}：${r.masked?.[f] || '（未設定）'}`);
+  $('keysCurrent').innerHTML = `目前已存：${parts.join('　')}<br>`
+    + '輸入框留空表示「不修改」，要換掉某一把才需要重新貼上。';
+
+  // 貼錯欄位是最常見又最難查的錯：症狀是 401，而 401 看起來像「金鑰過期」，
+  // 於是使用者會跑去重新簽發一把新的，然後再貼錯一次。
+  if (r.mismatched?.length) {
+    const msg = r.mismatched.map((m) => `「${m.label}」應該以 ${m.prefix} 開頭`).join('；');
+    $('keysCurrent').innerHTML += `<br><strong style="color:#dc2626">看起來貼錯欄位了：${msg}</strong>`;
+  }
+}
+
+$('saveKeys').addEventListener('click', async () => {
+  const patch = {};
+  for (const f of KEY_FIELDS) {
+    const v = $(f).value.trim();
+    if (v) patch[f] = v;          // 留空 = 不動既有的那把
+  }
+  if (!Object.keys(patch).length) {
+    $('keysSaved').textContent = '沒有填任何金鑰（留空表示不修改）';
+    return;
+  }
+  const r = await chrome.runtime.sendMessage({ type: 'ma:keys:set', patch });
+  for (const f of KEY_FIELDS) $(f).value = '';   // 存完就清掉，不留在畫面上
+  $('keysSaved').textContent = r?.ok ? '已儲存 ✓' : '儲存失敗';
+  setTimeout(() => ($('keysSaved').textContent = ''), 2500);
+  await loadKeys();
+});
+
+/**
+ * 測試按鈕。測的是**已經存起來的**金鑰，不是輸入框裡的字 ——
+ * 使用者實際會用到的是存起來那份，測輸入框那份可能測過了卻忘記按儲存。
+ */
+function wireTest(buttonId, stateId, vendor) {
+  $(buttonId).addEventListener('click', async () => {
+    const el = $(stateId);
+    el.className = 'keystate';
+    el.textContent = '測試中…';
+    const r = await chrome.runtime.sendMessage({ type: 'ma:keys:test', vendor });
+    if (r?.ok) {
+      el.className = 'keystate ok';
+      el.textContent = `可以用 ✓（${r.ms} 毫秒${r.model ? `，${r.model}` : ''}）`;
+    } else {
+      el.className = 'keystate bad';
+      el.textContent = `不能用：${r?.error || '未知錯誤'}`;
+    }
+  });
+}
+
+wireTest('testGroq', 'groqState', 'groq');
+wireTest('testNim', 'nimState', 'nim');
+wireTest('testNim2', 'nim2State', 'nim2');
+wireTest('testTavily', 'tavilyState', 'tavily');
 
 $('save').addEventListener('click', async () => {
   const patch = {};

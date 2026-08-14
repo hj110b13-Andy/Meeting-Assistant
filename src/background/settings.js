@@ -7,17 +7,24 @@
  *
  * ## 寫死的組合，以及為什麼
  *
- * 前提：**只花 Claude Pro 訂閱的錢，其他一律不花**。所以按量計費的路
- * （Claude API、Deepgram）整個移除，連設定欄位都不留 —— 留著就有誤觸的可能。
+ * 前提：**不接受任何按量計費**。所以會轉成帳單的路（Claude API、Deepgram）
+ * 整個移除，連設定欄位都不留 —— 留著就有誤觸的可能。
  *
- *   摘要   → Claude Code（Pro 訂閱額度，免費）
- *            一次 10–30 秒，但摘要本來就不需要即時，換到最好的品質。
- *   問答   → Chrome 內建 Gemini Nano（免費、離線、1–3 秒）
- *            被點名時要秒回，10–30 秒的後端在這裡沒有意義。
- *            Nano 跑不動的機器會自動退回 Claude Code（見 resolveProvider）。
- *   逐字稿 → 本機 whisper.cpp small 模型（免費、離線）
+ *   逐字稿 → Groq whisper-large-v3-turbo（免費方案）
+ *            實測 RTF 0.06、16.6 秒的樣本一字未錯。本機 small 是 RTF 0.47
+ *            而且「大致正確」—— 摘要吃的是逐字稿，錯一個關鍵詞整段就歪了。
+ *   摘要   → Groq gpt-oss-120b（免費方案）
+ *   問答   → Groq llama-3.3-70b-versatile（免費方案，實測 0.7 秒）
  *
- * 三條路都不會產生任何按量費用。
+ * 三條都退得回本機／訂閱制的免費路（本機 whisper.cpp、Claude Code 橋接），
+ * 沒有金鑰或撞到額度時自動接手，見 resolveProvider 與 provider.js。
+ *
+ * ## 這些「免費」到底是什麼意思
+ *
+ * Groq 與 NVIDIA NIM 的免費方案**不需要信用卡，也不會自動轉成按量計費**：
+ * 用超過就是回 HTTP 429，不是開始扣錢。這跟 Claude API 那種
+ * 「綁了卡就一直扣」的模式完全不同，所以才符合「只花已經買了的訂閱」這個前提。
+ * 額度數字與查證日期寫在 README。
  */
 
 export const DEFAULT_SETTINGS = {
@@ -27,10 +34,14 @@ export const DEFAULT_SETTINGS = {
 
   // ── 以下全部寫死，設定頁不顯示 ────────────────────────────
 
-  // 摘要與問答都走 Claude Code。見 resolveProvider 的說明 ——
-  // Chrome 內建的 Gemini Nano 不支援中文輸出，對中文會議沒有用。
-  provider: 'claude-code',
+  // 摘要與問答優先走雲端免費方案（快一個數量級），沒有金鑰或撞到額度時
+  // 自動退回 Claude Code 橋接。見 resolveProvider。
+  provider: 'cloud',
   fastAnswersLocal: false,
+
+  // 雲端不可用時要不要退回 Claude Code。關掉的話會直接告訴使用者失敗原因，
+  // 而不是安靜地變成一個要等 30 秒的後端 —— 有些人寧可知道它壞了。
+  cloudFallbackToBridge: true,
 
   // 摘要頻率：兩個條件都成立才觸發（AND）。
   // 5 分鐘而不是 1 分鐘：Claude Code 每次呼叫都是一個完整的 CLI session，
@@ -39,10 +50,13 @@ export const DEFAULT_SETTINGS = {
   summaryEveryMs: 300000,
   autoAnswer: true,
 
-  // 語音辨識：本機 whisper.cpp，small 模型。
-  // 用 small 是因為中文差距很大 —— 同一段音訊 base 把「這季／結帳／對帳／小陳」
-  // 全聽錯，small 全對，而原生 small 的 RTF（0.47）還比 WASM base（0.50）低。
-  sttEngine: 'whisper-native',
+  // 語音辨識：Groq 的 whisper-large-v3-turbo。
+  // 同一段 16.6 秒的中文會議錄音實測，RTF 0.06（本機原生 small 是 0.47、
+  // 瀏覽器 WASM base 是 0.50），而且逐字稿一字未錯 —— 本機 small 只是
+  // 「大致正確」，錯一個關鍵詞（對帳→對戰）就會把摘要與回答建議一起帶歪。
+  // 沒有金鑰時自動退回 whisper-native，見 service-worker 的 startAudioFallback。
+  sttEngine: 'groq',
+  sttGroqModel: 'whisper-large-v3-turbo',
   sttNativeModel: 'small',
   sttModel: 'Xenova/whisper-base',   // 原生起不來時的 WASM 備援
   sttTraditional: true,              // 辨識結果轉繁體（台灣用字）
@@ -62,8 +76,13 @@ export const DEFAULT_SETTINGS = {
   // 不是每台機器都跑得動。背景沒有 LanguageModel，問不到，只能由側邊欄回報。
   localModelUnsupported: false,
 
+  // 回答需要外部事實時，先用 Tavily 查一次網路再作答。
+  // 預設開啟但**只在問題看起來需要查證時才會呼叫**（見 tavily.js 的判斷），
+  // 因為每次查證都會多花 1–2 秒，而多數會議問題靠逐字稿就答得出來。
+  webSearch: true,
+
   // 設定結構的版本。用來做一次性遷移（見 migrate）。
-  schemaVersion: 4,
+  schemaVersion: 5,
 };
 
 /**
@@ -102,6 +121,17 @@ function migrate(stored) {
   if (!(out.schemaVersion >= 4)) {
     out.fastAnswersLocal = false;
     out.schemaVersion = 4;
+  }
+  if (!(out.schemaVersion >= 5)) {
+    // 主力從「本機 whisper ＋ Claude Code」換成「Groq 免費方案」。
+    // 舊設定存的是 sttEngine: 'whisper-native' 與 provider: 'claude-code'，
+    // 不遷移的話升級後一切照舊 —— 使用者會以為新版沒生效。
+    //
+    // 只搬「停在舊預設值」的情況。使用者若刻意留在本機引擎（例如不希望
+    // 音訊離開這台電腦），那是個有意識的選擇，不該被升級偷偷改掉。
+    if (out.sttEngine === 'whisper-native' || out.sttEngine === undefined) out.sttEngine = 'groq';
+    if (out.provider === 'claude-code' || out.provider === undefined) out.provider = 'cloud';
+    out.schemaVersion = 5;
   }
   return out;
 }
@@ -148,8 +178,13 @@ export async function saveSettings(patch) {
  * `fastAnswersLocal` 保留給「哪天 Nano 支援中文了」或使用者主要開英文會議的情況，
  * 預設關閉。要打開的話直接改 storage。
  */
-export function resolveProvider(settings, role = 'summary') {
+export function resolveProvider(settings, role = 'summary', opts = {}) {
   const localOk = !settings.localModelUnsupported;
+
+  // 雲端免費方案優先 —— 但**只有真的有金鑰時**（cloudReady 由 provider.js 帶進來）。
+  // 沒有金鑰卻回傳 'cloud' 的話，每一次呼叫都要先失敗一輪才退回橋接，
+  // 使用者看到的是「每次都慢 20 秒」而不是「沒設定金鑰」。
+  if (settings.provider === 'cloud' && opts.cloudReady) return 'cloud';
 
   // 預設不再走 Nano（不支援中文輸出）。fastAnswersLocal 明確設成 true 才會用。
   if (role === 'answer' && localOk && settings.fastAnswersLocal === true) return 'chrome-ai';

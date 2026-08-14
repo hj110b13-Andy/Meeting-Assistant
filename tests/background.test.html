@@ -23,6 +23,8 @@ const SETTINGS = {
   provider: 'claude-code', fastAnswersLocal: true,
   sttEngine: 'whisper-native', sttNativeModel: 'small', sttAuto: true,
 };
+// 雲端金鑰。預設空的：既有測試驗的是「沒有金鑰時退回免費本機路線」的行為。
+const KEYS = {};
 window.__broadcasts = [];
 window.__fetches = [];
 window.__sentToRuntime = [];
@@ -47,7 +49,18 @@ window.chrome = {
   // 點工具列圖示是 Chrome 唯一穩定認可的手勢來源，音訊擷取靠它啟動
   action: { onClicked: { addListener: (fn) => { window.__onActionClicked = fn; } } },
   sidePanel: { setPanelBehavior: async () => {}, open: async () => {} },
-  storage: { local: { get: async (k) => (k === 'settings' ? { settings: SETTINGS } : {}), set: async () => {} } },
+  storage: {
+    local: {
+      get: async (k) => {
+        if (k === 'settings') return { settings: SETTINGS };
+        // 金鑰跟設定分開存（見 keys.js）。預設是空的 —— 大部分既有測試
+        // 驗的是「沒有雲端金鑰時的行為」，所以空值才是對的起點。
+        if (k === 'cloudKeys') return Object.keys(KEYS).length ? { cloudKeys: KEYS } : {};
+        return {};
+      },
+      set: async (obj) => { if (obj.cloudKeys) Object.assign(KEYS, obj.cloudKeys); },
+    },
+  },
   offscreen: { hasDocument: async () => false, createDocument: async () => {}, closeDocument: async () => {} },
   tabCapture: { getMediaStreamId: async () => 'stream-id' },
   // executeScript 用來把「擴充功能已被該分頁叫用過」這個授權補上，
@@ -123,9 +136,74 @@ const SUMMARY_JSON = JSON.stringify({
   actions: [{ owner: '小陳', task: '追 API' }], open_questions: [],
 });
 window.__nextStatus = 200;
+
+// 雲端那幾家是 OpenAI 相容的介面（choices[0].message.content），
+// 形狀跟 Anthropic 完全不同，所以要照網址分流。
+// __cloudStatus 用網址關鍵字指定「這一家下一次回什麼狀態碼」，
+// 用來測 429 冷卻與候選鏈的退避。
+window.__cloudStatus = {};
+window.__cloudReplies = [];
+window.__cloudAlwaysFail = false;
+function cloudStubResponse(url, body) {
+  const host = url.includes('groq') ? 'groq' : 'nvidia';
+  const forced = window.__cloudAlwaysFail ? 503 : window.__cloudStatus[host];
+  if (forced && forced !== 200) {
+    if (!window.__cloudAlwaysFail) delete window.__cloudStatus[host];
+    return {
+      ok: false, status: forced,
+      headers: { get: (h) => (h.toLowerCase() === 'retry-after' ? '30' : null) },
+      json: async () => ({ error: { message: `測試錯誤 ${forced}` } }),
+      text: async () => `測試錯誤 ${forced}`,
+    };
+  }
+  const text = window.__cloudReplies.shift() || '第一行答案\n・要點一\n・要點二';
+  if (!body.stream) {
+    return {
+      ok: true, status: 200,
+      headers: { get: () => null },
+      json: async () => ({ choices: [{ message: { content: text }, finish_reason: 'stop' }] }),
+    };
+  }
+  // OpenAI 風格的 SSE。跟 Anthropic 那組一樣，故意把一個事件切在
+  // chunk 邊界上 —— 半行 JSON 直接 parse 會丟例外並中斷整個串流。
+  const parts = [
+    `data: ${JSON.stringify({ choices: [{ delta: { content: text.slice(0, 3) } }] })}\n\n`,
+    `data: ${JSON.stringify({ choices: [{ delta: { content: text.slice(3) } }] }).slice(0, 20)}`,
+    `${JSON.stringify({ choices: [{ delta: { content: text.slice(3) } }] }).slice(20)}\n\n`,
+    'data: [DONE]\n\n',
+  ];
+  const enc = new TextEncoder();
+  let i = 0;
+  return {
+    ok: true, status: 200,
+    headers: { get: () => null },
+    body: { getReader: () => ({
+      read: async () => (i < parts.length ? { done: false, value: enc.encode(parts[i++]) } : { done: true }),
+    }) },
+  };
+}
+
 window.fetch = async (url, opts) => {
+  const u = String(url);
+
+  // Tavily 收的是查詢，回的是搜尋結果，跟聊天完全不同
+  if (u.includes('api.tavily.com')) {
+    window.__fetches.push({ url: u, headers: opts.headers, body: JSON.parse(opts.body) });
+    if (window.__tavilyFails) return { ok: false, status: 432, json: async () => ({}) };
+    return { ok: true, status: 200, json: async () => ({
+      answer: '目前的營所稅率是 20%。',
+      results: [{ title: '財政部公告', url: 'https://example.gov.tw/tax', content: '營所稅率 20%。' }],
+    }) };
+  }
+
+  if (u.includes('api.groq.com') || u.includes('integrate.api.nvidia.com')) {
+    const body = JSON.parse(opts.body);
+    window.__fetches.push({ url: u, headers: opts.headers, body });
+    return cloudStubResponse(u, body);
+  }
+
   const body = JSON.parse(opts.body);
-  window.__fetches.push({ url, headers: opts.headers, body });
+  window.__fetches.push({ url: u, headers: opts.headers, body });
 
   if (window.__nextStatus !== 200) {
     const status = window.__nextStatus;
@@ -164,6 +242,9 @@ window.store = window.__module_store;
 <script src="settings.test.js"></script>
 <script src="localmodel.test.js"></script>
 <script src="claudecode.test.js"></script>
+<script src="keys.test.js"></script>
+<script src="cloud.test.js"></script>
+<script src="tavily.test.js"></script>
 <script src="provider.test.js"></script>
 <script src="whisper-native.test.js"></script>
 <script src="sw.test.js"></script>
@@ -382,12 +463,15 @@ window.store = window.__module_store;
     sttInfo?.ok === true && sttInfo.installed === true && sttInfo.models.includes('ggml-small-q5_1.bin'),
     JSON.stringify(sttInfo));
 
-  // ── 設定遷移：舊使用者停在 WASM 引擎上會不知道有更好的可用 ────
+  // ── 設定遷移：舊使用者停在舊引擎上會不知道有更好的可用 ────────
+  // 遷移是**鏈式**的：第 2 版把 WASM 換成原生，第 5 版再把原生換成雲端。
+  // 所以一個從第 1 版一路升上來的使用者最後會落在 groq —— 每一段都只是
+  // 「把停在當時預設值的人帶到新的預設值」，不會覆蓋刻意的選擇。
   SETTINGS.sttEngine = 'whisper';
   delete SETTINGS.schemaVersion;
   const migrated = await getSettings();
-  check('舊設定裡的 WASM 引擎會遷移成原生引擎',
-    migrated.sttEngine === 'whisper-native', migrated.sttEngine);
+  check('舊設定會一路遷移到目前的預設引擎（WASM → 原生 → 雲端）',
+    migrated.sttEngine === 'groq', migrated.sttEngine);
   SETTINGS.schemaVersion = 2;
   const kept = await getSettings();
   check('已遷移過之後就尊重使用者的選擇，不再改動',
@@ -626,6 +710,249 @@ window.store = window.__module_store;
   delete SETTINGS.apiKey;
   SETTINGS.provider = 'claude-code';
   SETTINGS.localModelUnsupported = false;
+
+  // ══ 雲端免費方案（Groq／NVIDIA NIM）════════════════════════════
+
+  // ── 金鑰的形狀檢查 ────────────────────────────────────────────
+  // 貼錯欄位是最常見又最難查的錯：症狀是 401，而 401 看起來像「金鑰過期」，
+  // 使用者會跑去重新簽發一把新的，然後再貼錯一次。
+  check('把 Groq 金鑰貼到 NVIDIA 欄位會被抓出來',
+    mismatchedKeys({ groq: 'gsk_x', nvidia: 'gsk_wrong' }).some((m) => m.field === 'nvidia'));
+  check('正確的字首不會誤報',
+    mismatchedKeys({ groq: 'gsk_x', nvidia: 'nvapi-y', tavily: 'tvly-z' }).length === 0);
+  check('沒填的欄位不算貼錯', mismatchedKeys({ groq: '', nvidia: '' }).length === 0);
+
+  // 這個頁面會出現在截圖與螢幕分享裡，完整金鑰絕對不能回到畫面上。
+  // 假金鑰一律含大寫 FAKE —— check-project.ps1 的金鑰外洩掃描靠這個約定
+  // 分辨「測試用的假貨」與「不小心貼進來的真金鑰」。
+  const secret = 'gsk_FAKEmiddlepartmustnotappear0123456789';
+  check('遮罩不會洩漏完整金鑰', !maskKey(secret).includes('middlepartmustnotappear'), maskKey(secret));
+  check('遮罩仍留頭尾方便辨認是哪一把',
+    maskKey(secret).startsWith('gsk_FAKE') && maskKey(secret).endsWith('6789'), maskKey(secret));
+  check('沒設定時顯示得出來', maskKey('') === '（未設定）');
+
+  // ── 沒有金鑰時不能解析成雲端 ──────────────────────────────────
+  // 回傳 'cloud' 卻沒有金鑰的話，每一次呼叫都要先失敗一輪才退回橋接 ——
+  // 使用者看到的是「每次都慢 20 秒」，而不是「你沒設定金鑰」。
+  SETTINGS.provider = 'cloud';
+  const noKeys = await send({ type: 'ma:provider' });
+  check('沒有金鑰時不會解析成雲端',
+    noKeys?.provider === 'claude-code' && noKeys?.answerProvider !== 'cloud',
+    JSON.stringify({ p: noKeys?.provider, a: noKeys?.answerProvider }));
+  check('沒有金鑰時如實回報未設定', noKeys?.cloudConfigured === false);
+
+  // ── 有金鑰之後才走雲端 ────────────────────────────────────────
+  KEYS.groq = 'gsk_test';
+  KEYS.nvidia = 'nvapi-test1';
+  KEYS.nvidia2 = 'nvapi-test2';
+  const withKeys = await send({ type: 'ma:provider' });
+  check('有金鑰時摘要與回答都走雲端',
+    withKeys?.provider === 'cloud' && withKeys?.answerProvider === 'cloud',
+    JSON.stringify({ p: withKeys?.provider, a: withKeys?.answerProvider }));
+  check('雲端一樣是免費的（免費方案，不是按量計費）', withKeys?.free === true);
+  check('回報金鑰已設定', withKeys?.cloudConfigured === true);
+
+  // ── 送出去的請求形狀 ──────────────────────────────────────────
+  window.__fetches.length = 0;
+  const okRes = await cloudComplete({
+    role: 'answer',
+    system: [{ type: 'text', text: '你是助手' }],
+    messages: [{ role: 'user', content: '小陳問我：對帳進度？' }],
+  });
+  const req = window.__fetches.find((f) => f.url.includes('groq'));
+  check('回答走 Groq', !!req, JSON.stringify(window.__fetches.map((f) => f.url)));
+  check('用 Bearer 帶金鑰', req?.headers?.Authorization === 'Bearer gsk_test', req?.headers?.Authorization);
+  check('回答用的是不吐思考過程的模型（要秒回）',
+    req?.body?.model === 'llama-3.3-70b-versatile', req?.body?.model);
+  check('system 區塊被攤平成 system 訊息',
+    req?.body?.messages?.[0]?.role === 'system' && req.body.messages[0].content === '你是助手',
+    JSON.stringify(req?.body?.messages?.[0]));
+  check('使用者訊息照原樣帶過去',
+    req?.body?.messages?.[1]?.content === '小陳問我：對帳進度？',
+    JSON.stringify(req?.body?.messages?.[1]));
+  // 形狀必須跟 ccComplete 一致，否則雲端失敗時的退路是壞的，
+  // 而且只有在雲端失敗的時候才會被發現
+  check('回傳形狀跟 Claude Code 一致（text ＋ stopReason）',
+    typeof okRes.text === 'string' && okRes.stopReason === 'end_turn',
+    JSON.stringify({ t: typeof okRes.text, s: okRes.stopReason }));
+
+  // ── 摘要與回答刻意用不同模型 ──────────────────────────────────
+  // Groq 的免費額度是「每個模型一個桶」，分開用等於把可用額度變兩份，
+  // 而且摘要吃掉的 token 不會排擠到「被點名時要秒回」這件事。
+  window.__fetches.length = 0;
+  await cloudComplete({ role: 'summary', prompt: '整理重點' });
+  const sumReq = window.__fetches.find((f) => f.url.includes('groq'));
+  check('摘要用的是另一個模型（額度分桶）',
+    sumReq?.body?.model === 'openai/gpt-oss-120b' && sumReq.body.model !== req?.body?.model,
+    sumReq?.body?.model);
+
+  // ── 推理模型的 <think> 要切掉 ─────────────────────────────────
+  // 沒切的話側邊欄會顯示一大段英文思考過程，使用者要自己在裡面找答案
+  window.__cloudReplies.push('<think>Let me consider the options…</think>對帳 8/20 開通。');
+  const thought = await cloudComplete({ role: 'answer', prompt: 'x' });
+  check('思考過程被切掉，只留答案',
+    thought.text === '對帳 8/20 開通。', JSON.stringify(thought.text));
+
+  // ── 429 之後換下一個候選，而且記住冷卻 ────────────────────────
+  window.__fetches.length = 0;
+  window.__cloudStatus.groq = 429;
+  const afterLimit = await cloudComplete({ role: 'answer', prompt: 'x' });
+  check('Groq 撞到額度時自動換下一個候選', afterLimit.text.length > 0);
+  check('換過去的是同一家的另一個模型或 NVIDIA',
+    window.__fetches.length >= 2, `只打了 ${window.__fetches.length} 次`);
+
+  // ── 串流 ──────────────────────────────────────────────────────
+  window.__cloudReplies.push('對帳 API 8/20 開通，退款流程同步調整。');
+  const deltas = [];
+  const streamed = await cloudStream({ role: 'answer', prompt: 'x', onDelta: (d) => deltas.push(d) });
+  check('串流拿得到完整內容',
+    streamed.text === '對帳 API 8/20 開通，退款流程同步調整。', JSON.stringify(streamed.text));
+  check('真的是逐塊送達（SSE 事件被切在 chunk 邊界也要接得起來）',
+    deltas.length > 1 && deltas.join('') === streamed.text,
+    JSON.stringify({ n: deltas.length, joined: deltas.join('') }));
+
+  // 還沒吐字的失敗可以重試；上層看到 CloudUnavailable 才知道要退回橋接。
+  // 丟原始的 Error 的話 withFallback 不會接手 —— 回答就直接死掉。
+  window.__cloudStatus.groq = 500;
+  const deltas2 = [];
+  const retried = await cloudStream({ role: 'answer', prompt: 'x', onDelta: (d) => deltas2.push(d) });
+  check('串流第一個候選失敗時換下一個（還沒吐字，重試是安全的）',
+    !!retried.text, JSON.stringify(retried));
+
+  // 完全沒有候選時一定要是 CloudUnavailable，不能是別的例外
+  const savedForStream = { ...KEYS };
+  delete KEYS.groq; delete KEYS.nvidia; delete KEYS.nvidia2;
+  let streamErr = null;
+  try { await cloudStream({ role: 'answer', prompt: 'x', onDelta: () => {} }); } catch (e) { streamErr = e; }
+  check('串流沒有後端可用時丟 CloudUnavailable（上層才會退回橋接）',
+    streamErr instanceof CloudUnavailable, String(streamErr && streamErr.name));
+  Object.assign(KEYS, savedForStream);
+
+  // ── 全部不通時丟 CloudUnavailable，讓上層可以退回橋接 ──────────
+  const savedKeys = { ...KEYS };
+  delete KEYS.groq; delete KEYS.nvidia; delete KEYS.nvidia2;
+  let cloudErr = null;
+  try { await cloudComplete({ role: 'answer', prompt: 'x' }); } catch (e) { cloudErr = e; }
+  check('沒有任何金鑰時丟出 CloudUnavailable（上層才知道要退路）',
+    cloudErr instanceof CloudUnavailable, String(cloudErr));
+  Object.assign(KEYS, savedKeys);
+
+  // ── 雲端整條死掉時，回答仍然出得來，而且使用者被告知 ────────────
+  // 這是整個退路設計的核心：0.7 秒變成 10–30 秒，不講的話使用者只會
+  // 覺得「今天特別慢」，然後去懷疑自己的網路。
+  SETTINGS.provider = 'cloud';
+  SETTINGS.autoAnswer = true;
+  window.__cloudAlwaysFail = true;
+  window.__native.autoRun = true;   // 前面的區塊可能關掉了，退路要靠它回覆
+  window.__broadcasts.length = 0;
+  // ma:ask 立刻回覆、答案在背景跑，所以要把佇列排乾才看得到結果
+  await send({ type: 'ma:ask', question: '對帳進度如何？' });
+  await settle(); await settle(); await settle(); await settle();
+  const answered = window.__broadcasts.filter((b) => b?.type === 'answerDone');
+  check('雲端全掛時回答仍然產生得出來（退回 Claude Code）',
+    answered.length >= 1 && !!answered[answered.length - 1]?.payload?.answer,
+    JSON.stringify(answered.map((a) => a?.payload?.answer)));
+  check('而且明確告訴使用者換了後端、會慢很多',
+    window.__broadcasts.some((b) => b?.type === 'answerNote'
+      && /雲端後端暫時不可用/.test(b?.payload?.note || '')),
+    JSON.stringify(window.__broadcasts.filter((b) => b?.type === 'answerNote').map((b) => b?.payload?.note)));
+
+  // 關掉退路的人要拿到明確的失敗，而不是一個安靜變慢的後端
+  SETTINGS.cloudFallbackToBridge = false;
+  window.__broadcasts.length = 0;
+  await send({ type: 'ma:ask', question: '再問一次' });
+  await settle(); await settle(); await settle(); await settle();
+  const done = window.__broadcasts.filter((b) => b?.type === 'answerDone');
+  check('關掉退路時如實失敗（不安靜降級）',
+    done.length >= 1 && !!done[done.length - 1]?.payload?.error,
+    JSON.stringify(done.map((d) => d?.payload?.error)));
+  delete SETTINGS.cloudFallbackToBridge;
+  window.__cloudAlwaysFail = false;
+
+  // ── 沒有金鑰時，聆聽會退回本機辨識而不是安靜失敗 ───────────────
+  const keepGroq = KEYS.groq;
+  delete KEYS.groq;
+  SETTINGS.sttEngine = 'groq';
+  window.__sentToRuntime.length = 0;
+  window.__broadcasts.length = 0;
+  await send({ type: 'ma:audio:start', streamId: 'stream-id' });
+  const startMsg = window.__sentToRuntime.find((m) => m.type === 'ma:offscreen:start');
+  check('沒有 Groq 金鑰時改用本機引擎',
+    startMsg?.engine === 'whisper-native', startMsg?.engine);
+  check('而且明確告訴使用者為什麼（不安靜降級）',
+    window.__broadcasts.some((b) => /Groq 金鑰/.test(b?.payload?.message || '')),
+    JSON.stringify(window.__broadcasts.map((b) => b?.payload?.message).filter(Boolean)));
+  await send({ type: 'ma:audio:stop' });
+  KEYS.groq = keepGroq;
+
+  // ── 有金鑰時金鑰會傳給 offscreen ──────────────────────────────
+  window.__sentToRuntime.length = 0;
+  // 記下這一刻的位置，後面才分得出「這一輪送了什麼」與「前一輪留下的」——
+  // 直接看最後幾則會撈到上一段測試的 sttStart，然後誤判成雲端也啟動了伺服器
+  const nativeMarkCloud = window.__native.posted.length;
+  await send({ type: 'ma:audio:start', streamId: 'stream-id' });
+  const cloudStart = window.__sentToRuntime.find((m) => m.type === 'ma:offscreen:start');
+  check('有金鑰時用雲端辨識', cloudStart?.engine === 'groq', cloudStart?.engine);
+  check('金鑰隨啟動訊息傳給 offscreen',
+    cloudStart?.options?.groqKey === 'gsk_test', String(cloudStart?.options?.groqKey));
+  check('用的是 turbo 模型',
+    cloudStart?.options?.groqSttModel === 'whisper-large-v3-turbo', cloudStart?.options?.groqSttModel);
+  // 雲端不需要啟動本機辨識伺服器 —— 白啟動會佔住 400 MB 記憶體
+  const nativeAfter = window.__native.posted.slice(nativeMarkCloud);
+  check('走雲端時不會去啟動本機辨識伺服器',
+    !nativeAfter.some((m) => m.type === 'sttStart'),
+    JSON.stringify(nativeAfter.map((m) => m.type)));
+  await send({ type: 'ma:audio:stop' });
+
+  // ── Tavily：只在需要外部事實時才查 ────────────────────────────
+  check('提到法規要查證', needsSearch('這個新的個資法規定我們要怎麼做？'));
+  check('提到最新消息要查證', needsSearch('最新的匯率是多少？'));
+  check('直接要求查證', needsSearch('你幫我查一下這家競品的資料'));
+  // 會議內部的問題不該浪費查詢額度，也不該多花 1–2 秒
+  check('會議內部的問題不查證', needsSearch('剛剛那個失敗率是多少？') === false);
+  check('問我的看法不查證', needsSearch('你覺得這樣可行嗎？') === false);
+  check('太短的字串不查證', needsSearch('嗯？') === false);
+
+  KEYS.tavily = 'tvly-test';
+  const found = await searchWeb('最新的營所稅率');
+  check('沒有 Tavily 金鑰時直接跳過查證（不會白打一次網路）',
+    (await (async () => { const k = KEYS.tavily; delete KEYS.tavily;
+      const r = await searchWeb('x'); KEYS.tavily = k; return r; })()).ok === false);
+  check('查證結果整理成可以塞進提示詞的文字',
+    formatForPrompt(found).includes('營所稅率') && formatForPrompt(found).includes('example.gov.tw'),
+    formatForPrompt(found).slice(0, 60));
+  // 查證只是加分，失敗不該讓整個回答失效
+  window.__tavilyFails = true;
+  const failed = await searchWeb('最新的營所稅率');
+  check('查證失敗不會丟例外（回答仍然要出得來）', failed.ok === false && !!failed.error, JSON.stringify(failed));
+  check('查證失敗時不會產生提示詞區塊', formatForPrompt(failed) === '');
+  window.__tavilyFails = false;
+
+  // ── 查證真的接在回答流程上 ────────────────────────────────────
+  // 這條路只有在問題「看起來需要外部資料」時才會走到，所以很容易寫壞了
+  // 卻一直沒被發現 —— 平常的測試問題都不會觸發它。
+  SETTINGS.provider = 'cloud';
+  window.__broadcasts.length = 0;
+  window.__fetches.length = 0;
+  await send(seg('q-web', '李美華', '小陳，最新的營所稅率會影響我們的預估嗎？'));
+  await settle(); await settle(); await settle(); await settle();
+  check('需要外部資料的問題會先查一次網路',
+    window.__fetches.some((f) => String(f.url).includes('api.tavily.com')),
+    JSON.stringify(window.__fetches.map((f) => f.url)));
+  check('查證結果會被塞進送給模型的提示詞裡',
+    window.__fetches.some((f) => String(f.url).includes('groq')
+      && JSON.stringify(f.body?.messages || '').includes('網路查證')),
+    JSON.stringify(window.__fetches.filter((f) => String(f.url).includes('groq')).map((f) => String(JSON.stringify(f.body?.messages)).slice(0, 120))));
+
+  // ── 沒有付費端點 ──────────────────────────────────────────────
+  // 這是「不接受任何按量計費」的迴歸測試。Groq／NIM／Tavily 三家走的都是
+  // 免費方案（撞到上限回 429，不會變成帳單），api.anthropic.com 則是按量計費。
+  check('整場測試都沒有打過任何按量計費的端點',
+    !window.__fetches.some((f) => String(f.url || '').includes('api.anthropic.com')),
+    JSON.stringify(window.__fetches.map((f) => f.url).filter((u) => u.includes('anthropic'))));
+
+  SETTINGS.provider = 'claude-code';
+  SETTINGS.sttEngine = 'whisper-native';
 
   } catch (err) {
     // 中斷也要把已完成的結果印出來，否則看不出斷在哪一步

@@ -172,6 +172,107 @@ let threw = '';
 try { await nativeTranscribe(new Float32Array(160)); } catch (e) { threw = e.message; }
 check('伺服器回非 200 時丟出可讀的錯誤', threw.includes('503'), threw);
 
+// ── 雲端辨識（Groq） ────────────────────────────────────────────
+// 這是預設引擎：同一段 16.6 秒的中文樣本，RTF 0.06（本機原生 small 是 0.47），
+// 而且逐字稿一字未錯。
+window.fetch = async (url, opts) => {
+  lastRequest = { url, opts };
+  return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ text: ' 这是云端结果 ' }) };
+};
+engineName = 'groq';
+cloudKey = 'gsk_test';
+cloudModel = 'whisper-large-v3-turbo';
+cloudPrompt = '以下是繁體中文（台灣）的會議逐字稿。';
+const cloudText = await groqTranscribe(new Float32Array(160));
+
+check('雲端辨識打的是 Groq 的 transcriptions 端點',
+  lastRequest?.url === 'https://api.groq.com/openai/v1/audio/transcriptions', String(lastRequest?.url));
+check('用 Bearer 帶金鑰',
+  lastRequest?.opts?.headers?.Authorization === 'Bearer gsk_test',
+  String(lastRequest?.opts?.headers?.Authorization));
+check('指定 turbo 模型',
+  lastRequest?.opts?.body?.get('model') === 'whisper-large-v3-turbo',
+  String(lastRequest?.opts?.body?.get('model')));
+// 指定語言可以省掉模型自己偵測的那一步，也避免中文被誤判成日文
+check('指定語言為中文', lastRequest?.opts?.body?.get('language') === 'zh');
+// 提示詞在這裡是用來指定書寫系統：不給會吐簡體，給繁體提示詞就直接吐繁體
+check('帶繁體提示詞（用來指定書寫系統）',
+  String(lastRequest?.opts?.body?.get('prompt')).includes('繁體'),
+  String(lastRequest?.opts?.body?.get('prompt')));
+check('temperature 設 0（辨識要可重現）', lastRequest?.opts?.body?.get('temperature') === '0');
+check('雲端結果原樣回傳（繁體轉換在 handleResult 才做）',
+  cloudText === ' 这是云端结果 ', `「${cloudText}」`);
+
+// 撞到額度不是當機，訊息要分得出來 —— 使用者看到的是逐字稿停住
+window.fetch = async () => ({
+  ok: false, status: 429,
+  headers: { get: (h) => (h.toLowerCase() === 'retry-after' ? '42' : null) },
+  json: async () => ({}),
+});
+let limitErr = '';
+try { await groqTranscribe(new Float32Array(160)); } catch (e) { limitErr = e.message; }
+check('額度用完時說得出是額度問題，不是當機',
+  limitErr.includes('額度') && limitErr.includes('42'), limitErr);
+
+window.fetch = async () => ({ ok: false, status: 401, headers: { get: () => null }, json: async () => ({}) });
+let authErr = '';
+try { await groqTranscribe(new Float32Array(160)); } catch (e) { authErr = e.message; }
+check('金鑰被拒時直接叫使用者去看設定頁',
+  authErr.includes('金鑰') && authErr.includes('設定頁'), authErr);
+
+// ── 雲端的積壓處置是「合併」，不是「丟掉」 ──────────────────────
+// 雲端的瓶頸是每分鐘 20 次請求，不是算得多快。丟掉等於白白丟掉使用者
+// 講的話；合併不會 —— 兩段黏起來送一次，內容一個字都不會少。
+sent.length = 0;
+pending = [];
+dropped = 0;
+merged = 0;
+transcribe = null;              // pump 不會真的送出，佇列只會累積
+engineName = 'groq';
+lastCloudSentAt = Date.now();   // 假裝剛送過，節流窗還沒過
+for (let i = 0; i < 4; i++) enqueue(new Float32Array(16000), 1000 + i);
+check('雲端積壓時合併成一段，不丟掉', pending.length === 1, `佇列 ${pending.length} 段`);
+check('沒有任何一段被丟掉', dropped === 0, String(dropped));
+check('合併的段數有記錄', merged === 3, String(merged));
+check('合併後的音訊是四段加起來的長度',
+  pending[0].audio.length === 4 * 16000, String(pending[0].audio.length));
+check('保留最早那段的說話時間（排序才不會亂）',
+  pending[0].startedAt === 1000, String(pending[0].startedAt));
+
+// 合併有上限：超過 whisper 的 30 秒窗反而要多跑一輪編碼器，
+// 而且一段太長會讓逐字稿變成一大塊、難讀也難對上說話者
+pending = [];
+merged = 0;
+enqueue(new Float32Array(27 * 16000), 5000);
+enqueue(new Float32Array(5 * 16000), 6000);
+check('超過合併上限就另起一段', pending.length === 2, `佇列 ${pending.length} 段`);
+
+// 節流：還沒到時間就不送，但**不能丟掉**佇列裡的東西
+pending = [];
+transcribe = async () => '測試';
+lastCloudSentAt = Date.now();
+enqueue(new Float32Array(16000), 7000);
+check('節流期間工作留在佇列裡等，不會消失', pending.length === 1, `佇列 ${pending.length} 段`);
+check('節流期間不會送出', busy === false);
+
+// 節流窗過了就送得出去
+pending = [];
+sent.length = 0;
+lastResultText = '';
+toTraditionalOn = false;
+lastCloudSentAt = 0;
+speakerLabel = '其他人（雲端辨識）';
+enqueue(new Float32Array(16000), 8000);
+await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+check('節流窗過了就會送出並產生逐字稿',
+  sent.some((m) => m.type === 'ma:segment'),
+  JSON.stringify(sent.map((m) => m.type)));
+check('雲端辨識的段落標成雲端來源',
+  sent.find((m) => m.type === 'ma:segment')?.payload.speaker === '其他人（雲端辨識）',
+  sent.find((m) => m.type === 'ma:segment')?.payload.speaker);
+
+engineName = 'whisper-native';   // 收乾淨，免得影響之後新增的測試
+
 // ── 收尾 ────────────────────────────────────────────────────────
 const failed = results.filter((r) => r.startsWith('FAIL')).length;
 results.push('---');

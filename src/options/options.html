@@ -30,7 +30,15 @@
     button { font: inherit; padding: 8px 18px; border-radius: 7px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
     button.sec { background: transparent; color: var(--accent); }
     .bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-    #saved, #sttState, #jitsiState { color: var(--accent); font-size: 13px; }
+    #saved, #sttState, #jitsiState, #keysSaved { color: var(--accent); font-size: 13px; }
+    input[type="password"] {
+      width: 100%; font: 13px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace;
+      padding: 7px 9px; border: 1px solid var(--line);
+      border-radius: 6px; background: var(--bg); color: var(--fg);
+    }
+    .keystate { font-size: 12px; color: var(--dim); }
+    .keystate.ok { color: #16a34a; }
+    .keystate.bad { color: #dc2626; }
     details { margin: 0 0 18px; }
     summary { cursor: pointer; font-size: 13px; color: var(--dim); }
     details fieldset { margin-top: 12px; }
@@ -41,9 +49,68 @@
 <div class="wrap">
   <h1>會議助手設定</h1>
   <p class="sub">
-    設定存在這台電腦，不會上傳。<strong>只有下面兩欄需要你填</strong> ——
+    設定與金鑰都存在這台電腦，不會上傳。<strong>需要你填的只有金鑰、名字、背景筆記</strong> ——
     其餘（模型、辨識引擎、摘要頻率）都已經設成實測最好的組合，而且全部免費。
   </p>
+
+  <fieldset>
+    <legend>API 金鑰</legend>
+    <p class="hint" style="margin-top:0">
+      三家都是<strong>免費方案：不需要信用卡，用超過就是被拒絕，不會變成帳單</strong>。
+      金鑰只存在這台電腦的瀏覽器裡，<strong>不會進入 GitHub</strong>（這個專案是公開的，
+      所以金鑰絕對不放在程式碼裡）。換一台電腦要重貼一次。
+    </p>
+
+    <label>
+      <span>GroqCloud —— 語音辨識與回答都靠它，<strong>沒填的話幾乎所有功能都會退到慢很多的路</strong></span>
+      <input id="groq" type="password" placeholder="gsk_…" autocomplete="off">
+    </label>
+    <div class="bar" style="margin-top:8px">
+      <button id="testGroq" class="sec" type="button">測試</button>
+      <span id="groqState" class="keystate"></span>
+    </div>
+
+    <label style="margin-top:16px">
+      <span>NVIDIA NIM 帳號 1（備援，可留空）</span>
+      <input id="nvidia" type="password" placeholder="nvapi-…" autocomplete="off">
+    </label>
+    <div class="bar" style="margin-top:8px">
+      <button id="testNim" class="sec" type="button">測試</button>
+      <span id="nimState" class="keystate"></span>
+    </div>
+
+    <label style="margin-top:16px">
+      <span>NVIDIA NIM 帳號 2（再一層備援，可留空）</span>
+      <input id="nvidia2" type="password" placeholder="nvapi-…" autocomplete="off">
+    </label>
+    <div class="bar" style="margin-top:8px">
+      <button id="testNim2" class="sec" type="button">測試</button>
+      <span id="nim2State" class="keystate"></span>
+    </div>
+    <p class="hint">
+      兩個 NVIDIA 帳號會<strong>輪流使用</strong>，把「單一帳號撞到上限」的機率往後推。
+      只填一個也可以。
+    </p>
+
+    <label style="margin-top:16px">
+      <span>Tavily —— 網路查證（可留空）</span>
+      <input id="tavily" type="password" placeholder="tvly-…" autocomplete="off">
+    </label>
+    <div class="bar" style="margin-top:8px">
+      <button id="testTavily" class="sec" type="button">測試</button>
+      <span id="tavilyState" class="keystate"></span>
+    </div>
+    <p class="hint">
+      只有在問題明顯需要「會議之外的最新資訊」時才會查（例如提到法規、匯率、最新消息）。
+      一般的會議問題靠逐字稿回答，不會浪費查詢額度。
+    </p>
+
+    <div class="bar" style="margin-top:16px">
+      <button id="saveKeys" type="button">儲存金鑰</button>
+      <span id="keysSaved"></span>
+    </div>
+    <p class="hint" id="keysCurrent"></p>
+  </fieldset>
 
   <fieldset>
     <legend>你是誰</legend>
@@ -78,8 +145,9 @@
       <strong>兩個條件都成立才會更新摘要。</strong>秒數是最短間隔，也就是真正的節流上限：
       設 300 就是「最多每 5 分鐘一次」，即使中間累積了 50 段也會等到時間到。
       段數則是「至少要有這麼多新內容才值得跑一次」，避免冷場時為兩句話白跑。<br>
-      預設 8 段 / 300 秒。摘要走 Claude Code，每次呼叫都是一個完整的 CLI session，
-      <strong>秒數設太小會很快吃掉 Claude Pro 的用量額度</strong>，建議不要低於 180。
+      預設 8 段 / 300 秒。摘要走 Groq 的免費方案（每天有 token 上限），
+      <strong>秒數設太小會在一場會議裡就把當天額度用掉</strong>，建議不要低於 180。
+      額度用完會自動退回 Claude Code（慢很多，但側邊欄會告訴你）。
     </p>
   </fieldset>
 
@@ -99,7 +167,9 @@
         <span id="sttState"></span>
       </div>
       <p class="hint">
-        逐字稿是用本機的 whisper.cpp（small 模型）辨識會議聲音，<strong>零費用、資料不離開這台電腦</strong>。
+        <strong>這是備援。</strong>預設的逐字稿走 Groq 的雲端辨識（快 8 倍、中文準確得多），
+        只有在沒填 Groq 金鑰時才會用到這條本機路線 —— 它用的是本機 whisper.cpp（small 模型），
+        <strong>零費用、資料不離開這台電腦</strong>，代價是慢且準確度較低。
         需要跑過一次 <code>tools\install-whisper.ps1</code>。
         辨識伺服器會在開始聆聽時自動啟動、停止時自動關掉，常駐約 400 MB 記憶體，
         上面那顆「停止」只是想提早把記憶體要回來時用的。
