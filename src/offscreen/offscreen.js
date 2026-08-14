@@ -512,7 +512,7 @@ function speakerCluster(audio) {
   if (!vp || !audio) return 0;
   if (!speakerBook) speakerBook = new vp.SpeakerBook();
   try {
-    const hit = speakerBook.assign(vp.embed(audio, TARGET_RATE));
+    const hit = speakerBook.assign(vp.analyze(audio, TARGET_RATE));
     return hit ? hit.id : 0;
   } catch {
     // 聲紋算錯絕對不能連帶讓逐字稿消失 —— 那是主要功能，這只是加分
