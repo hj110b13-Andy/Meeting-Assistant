@@ -111,6 +111,11 @@ Groq 主力模型 → Groq 備用模型 → NVIDIA NIM（兩個帳號輪流）�
 | NVIDIA NIM | 約 40 次/分，額度綁帳號 | 約每月（見下） | 只在 Groq 撞牆時才用到 |
 | Tavily | 1,000 點/月 | **每月 1 號歸零重給**，用不完不累積 | 通常個位數次 |
 
+> **Groq 沒有任何看得懂圖片的模型**（2026-08 實際問過 `/models`：兩支 whisper、
+> llama-3.1/3.3、gpt-oss、qwen3.6、compound，就這些）。所以「附上會議畫面」
+> 只能走 Claude Code 橋接 —— 那也是它現在唯一還必要的用途。
+> 要確認當下的清單就跑 `powershell -File tools\list-groq-models.ps1`。
+
 **Groq 的額度是「每個模型一個桶」**，所以辨識、摘要、回答刻意用三個不同模型 ——
 等於把可用額度變成三份，而且摘要吃掉的 token 不會排擠到「被點名要秒回」。
 

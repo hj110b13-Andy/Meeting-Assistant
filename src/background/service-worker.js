@@ -625,14 +625,74 @@ function addressesMe(text, myNames) {
   return myNames.some((n) => n && text.includes(n));
 }
 
+/**
+ * 「有沒有點到我」要看**前後一小段對話**，不能只看這一段。
+ *
+ * 人不會把名字和問題塞進同一句話裡。真實的樣子是：
+ *
+ *   「小陳，」→「成本優勢明顯，」→「這個是在哪裡體現？」
+ *
+ * 名字在第一段，問句在第三段。只檢查單一段落的話這題永遠不會觸發。
+ *
+ * 這是實測回報的迴歸：逐字稿改成**一句一段**（為了讓每一句各自對上說話者）
+ * 之後，原本會自動回答的問題突然都不回答了 —— 因為在那之前一整塊 28 秒的
+ * 音訊是**一個**段落，名字和問句剛好都在裡面。切細之後那個巧合就不見了。
+ *
+ * 不含我自己說的話：我提到自己的名字不算有人在問我。
+ */
+const ADDRESS_WINDOW_MS = 20000;
+
+/**
+ * 找出「點到我」的那一段話 —— 這一段本身，或前面 20 秒之內的任何一段。
+ *
+ * 不含我自己說的話：我提到自己的名字不算有人在問我。
+ * 從後往前找，取最近的那次點名。
+ */
+function findAddressing(segment, myNames) {
+  const until = segment.startedAt || segment.ts || Date.now();
+  const inWindow = store.getState().segments.filter((s) => {
+    if (s.source === 'me') return false;
+    const at = s.startedAt || s.ts || 0;
+    return at <= until && until - at <= ADDRESS_WINDOW_MS;
+  });
+  for (let i = inWindow.length - 1; i >= 0; i--) {
+    const s = inWindow[i];
+    if (addressesMe(s.text, myNames) || DIRECT_ADDRESS.test(s.text)) return s;
+  }
+  return null;
+}
+
+/**
+ * 同一次點名只回答一次。
+ *
+ * 一塊音訊會被切成好幾句，其中可能有兩三句都像問句 —— 沒有這道防線的話
+ * 同一次「有人問你」會產生兩三張回答卡片，每一張都燒一次額度。
+ * 切細之前不會發生（一塊 28 秒的音訊只有一個段落），所以這條是跟著切細一起加的。
+ *
+ * **記的是「哪一段話點了我」，不是時間。** 一開始寫成「12 秒內不再回答」，
+ * 但那樣有兩個問題：真正的追問（10 秒後的下一個問題）會被吃掉，
+ * 而且行為綁在牆上時鐘，測試只能靠 sleep 或改內部狀態才驗得到。
+ * 用點名的段落 id 當鍵就精準對上意圖：一次點名、一張卡片。
+ */
+let lastAnsweredAddressId = null;
+
 async function maybeAnswer(segment, settings) {
   if (segment.source === 'me') return;   // 我自己說的話不用回答
   const myNames = (settings.myNames || '').split(/[,，、\s]+/).filter(Boolean);
-  const isQuestion = looksLikeQuestion(segment.text);
-  if (!isQuestion) return;
-  // 有點名我、或直接對人講話 → 才自動產生建議，避免每個問句都燒 token
-  const targeted = addressesMe(segment.text, myNames) || DIRECT_ADDRESS.test(segment.text);
-  if (!targeted) return;
+  if (!looksLikeQuestion(segment.text)) return;
+
+  // 有點名我、或直接對人講話 → 才自動產生建議，避免每個問句都燒 token。
+  //
+  // **要看前後一小段對話，不能只看這一段。** 人不會把名字和問題塞進同一句話：
+  //   「小陳，」→「成本優勢明顯，」→「這個是在哪裡體現？」
+  // 名字在第一段、問句在第三段。這是實測回報的迴歸 —— 逐字稿改成一句一段
+  // 之後這類問題全部不再觸發，因為在那之前一整塊 28 秒是**一個**段落，
+  // 名字和問句剛好都在裡面。
+  const addressing = findAddressing(segment, myNames);
+  if (!addressing) return;
+  if (addressing.id === lastAnsweredAddressId) return;   // 這次點名已經回答過了
+  lastAnsweredAddressId = addressing.id;
+
   await answerQuestion({ question: segment.text, asker: segment.speaker, manual: false });
 }
 
@@ -661,38 +721,28 @@ async function answerQuestion({ question, asker, manual, withScreen }) {
   let provider = limits.provider;
   let transcriptChars = limits.transcriptChars;
   let imagePath = null;
-  let imageDataUrl = null;
-  let role = 'answer';
 
   if (withScreen) {
-    // **雲端優先，橋接是退路。**
+    // **只有 Claude Code 橋接看得懂圖片。**
     //
-    // 這裡原本一律把「附上會議畫面」升級到 Claude Code，因為雲端模型看不懂
-    // 圖片。實測踩到的問題是橋接比想像中脆弱：`config.json` 存的是 claude.exe
-    // 的絕對路徑，而 Claude Code 的 VS Code 擴充功能會自動更新到新的版號
-    // 資料夾，舊路徑就失效 —— 使用者看到的是「勾了附上會議畫面就出錯，
-    // 不勾就正常」，完全聯想不到是別的軟體更新造成的。
+    // 一度想讓雲端自己看（Groq 的 llama-4），結果那些模型名稱在 Groq 上
+    // 根本不存在 —— 實際問過 `/models`，清單裡一個視覺模型都沒有
+    // （見 cloud.js 的 vision 候選鏈與 tools\list-groq-models.ps1）。
+    // 所以既然使用者明確要求看畫面，就把這一題升級到 Claude Code
+    // （同樣免費，只是慢），而不是回一句「我看不懂」。
     //
-    // Groq 的 llama-4 看得懂圖片而且一樣免費，所以現在雲端自己處理：
-    // 1 秒內回來，也不依賴本機裝了什麼。
-    if (provider === 'cloud') {
-      try {
-        // 走雲端要的是 base64 data URL（不是檔案路徑），而且用 JPEG ——
-        // PNG 的整頁截圖動輒好幾 MB，會撞到請求大小上限。
-        imageDataUrl = await captureScreenDataUrl();
-        role = 'vision';
-        broadcast('answerNote', { id, note: '正在讀取會議畫面…' });
-      } catch (err) {
-        broadcast('answerNote', { id, note: `畫面擷取失敗，只依逐字稿回答：${err.message}` });
-      }
-    } else if (provider === 'chrome-ai' && await bridgeHealthy()) {
-      // 本機模型看不懂圖片，而且沒有雲端金鑰時也沒有 llama-4 可用 ——
-      // 這時橋接仍然是唯一看得懂畫面的路。
+    // 橋接原本的脆弱點已經修掉了：`config.json` 存的是 claude.exe 的絕對路徑，
+    // 而 Claude Code 的 VS Code 擴充功能會自動更新到新的版號資料夾 ——
+    // 舊路徑失效時使用者看到的是「勾了附上會議畫面就出錯，不勾就正常」，
+    // 完全聯想不到是別的軟體更新造成的。現在 host.ps1 會自己重新找一次。
+    const blind = provider === 'chrome-ai' || provider === 'cloud';
+    if (blind && await bridgeHealthy()) {
+      const was = provider;
       provider = 'claude-code';
       transcriptChars = BUDGET['claude-code'].transcript.answer;
       broadcast('answerNote', {
         id,
-        note: '本機模型看不懂圖片，這一題改用 Claude Code（較慢，但看得懂畫面）。',
+        note: `${was === 'cloud' ? '雲端模型' : '本機模型'}看不懂圖片，這一題改用 Claude Code（較慢，但看得懂畫面）。`,
       });
     }
 
@@ -703,11 +753,11 @@ async function answerQuestion({ question, asker, manual, withScreen }) {
       } catch (err) {
         broadcast('answerNote', { id, note: `畫面擷取失敗，只依逐字稿回答：${err.message}` });
       }
-    } else if (!imageDataUrl) {
+    } else {
       broadcast('answerNote', {
         id,
-        note: '目前的後端看不懂圖片。到設定頁貼上 Groq 金鑰就能用免費的雲端視覺模型；'
-          + '或執行 bridge\\install.ps1 啟用 Claude Code 橋接。這一題只依逐字稿回答。',
+        note: '沒有看得懂圖片的後端（雲端模型都不支援），而 Claude Code 橋接未就緒'
+          + '（需執行 bridge\\install.ps1）。這一題只依逐字稿回答。',
       });
     }
   }
@@ -728,15 +778,12 @@ async function answerQuestion({ question, asker, manual, withScreen }) {
 
   try {
     await stream({
-      // role 決定候選鏈。附上畫面時要走 vision 那條（看得懂圖片的模型），
-      // 否則圖片會被送給一個看不懂它的模型 —— 不會報錯，只是被忽略。
-      role,
+      role: 'answer',
       provider,
       maxTokens: 1200,
-      // imagePath 給橋接（Claude Code 讀檔案），imageDataUrl 給雲端（base64）。
-      // 兩個同時是 null 就是純文字回答。
+      // 只有橋接讀得懂圖片（讀檔案路徑）。雲端沒有視覺模型可用，
+      // 所以走到雲端時 imagePath 一定是 null。
       imagePath,
-      imageDataUrl,
       effort: 'low',
       // 即時回答重點是延遲：關閉思考，靠上下文與低 effort 換速度。
       thinking: { type: 'disabled' },
@@ -798,25 +845,6 @@ async function answerQuestion({ question, asker, manual, withScreen }) {
  * chrome.downloads.download 只回傳 id，路徑得再用 search 查；而且要等
  * state 變成 complete 才保證檔案已經寫完，否則 Claude Code 可能讀到空檔。
  */
-/**
- * 截圖成 base64 data URL，給雲端視覺模型用。
- *
- * 跟 captureScreenFile 的差別不只是格式：
- *
- *  - **用 JPEG 而不是 PNG。** 整頁截圖的 PNG 動輒好幾 MB，base64 之後再脹
- *    三分之一，會撞到請求大小上限（而失敗訊息不會告訴你是圖片太大）。
- *    會議畫面是簡報和人臉，JPEG 品質 70 完全夠讀。
- *  - **不落地成檔案。** 雲端要的是 base64，存檔只是多一次磁碟往返，
- *    而且會在使用者的下載資料夾裡累積一堆截圖。
- */
-async function captureScreenDataUrl() {
-  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  if (!tab) throw new Error('找不到作用中的分頁');
-  const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 70 });
-  if (!dataUrl) throw new Error('截圖是空的');
-  return dataUrl;
-}
-
 async function captureScreenFile() {
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   if (!tab) throw new Error('找不到作用中的分頁');

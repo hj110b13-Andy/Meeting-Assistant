@@ -66,7 +66,10 @@ const NIM_URL = 'https://integrate.api.nvidia.com/v1/chat/completions';
  * 完全沒有意義，所以 70B 只留在摘要鏈的最後一格（摘要慢一點無所謂），
  * 回答鏈只用 8B。
  */
-const CHAINS = {
+// 匯出是為了讓 run-cloud-check.ps1 能把裡面的模型 ID 挖出來，逐一問 Groq
+// 「這個還在嗎」。模型下架或改名時 API 回 404，而 404 在畫面上跟「額度用完」
+// 長得一模一樣（都是「改用 Claude Code」），使用者只會覺得今天特別慢。
+export const CHAINS = {
   answer: [
     { vendor: 'groq', model: 'llama-3.3-70b-versatile', timeoutMs: 20000 },
     { vendor: 'groq', model: 'llama-3.1-8b-instant', timeoutMs: 15000 },
@@ -81,21 +84,24 @@ const CHAINS = {
     { vendor: 'nim', model: 'meta/llama-3.3-70b-instruct', timeoutMs: 120000 },
   ],
   /**
-   * 看得懂圖片的模型（「附上會議畫面」用）。
+   * 看得懂圖片的模型 —— **目前是空的，因為 Groq 一個都沒有。**
    *
-   * 原本這條路只有 Claude Code 橋接：雲端模型看不懂圖片，所以勾了附畫面就
-   * 把那一題升級到橋接。實測踩到的問題是**橋接比想像中脆弱** ——
-   * `config.json` 存的是 claude.exe 的絕對路徑，而 Claude Code 的 VS Code
-   * 擴充功能會自動更新到新的版號資料夾，舊路徑就失效了。使用者看到的是
-   * 「勾了附上會議畫面就出錯，不勾就正常」，完全聯想不到是別的軟體更新造成的。
+   * 這裡一度放了 `meta-llama/llama-4-scout-17b-16e-instruct` 與
+   * `…-maverick-…`，想讓「附上會議畫面」不必依賴 Claude Code 橋接。
+   * **兩個都回 404。** 實際去問 Groq 的 `/models`（`tools\list-groq-models.ps1`）
+   * 得到的清單裡沒有任何視覺模型：只有兩支 whisper、llama-3.1/3.3、
+   * gpt-oss、qwen3.6、compound 這些純文字的。
    *
-   * Groq 的 llama-4 系列看得懂圖片，而且**一樣是免費方案**。所以現在先走雲端：
-   * 1 秒內回來，也不依賴本機裝了什麼。橋接留在最後當退路。
+   * 記在這裡是為了**不要再猜一次**。要新增的話先跑那支腳本看清單，
+   * 不要照著別處看到的模型名稱寫上去 —— 名稱錯的症狀是 404，
+   * 而 404 在畫面上跟「額度用完」長得很像（都是「雲端不能用，改走退路」），
+   * 使用者只會覺得變慢了。
+   *
+   * 所以看畫面這件事仍然走 Claude Code 橋接。橋接原本的脆弱點
+   * （config.json 存 claude.exe 的絕對路徑，Claude Code 一更新就失效）
+   * 已經在 `bridge/host.ps1` 修掉了 —— 路徑不存在時它會自己重新找一次。
    */
-  vision: [
-    { vendor: 'groq', model: 'meta-llama/llama-4-scout-17b-16e-instruct', timeoutMs: 30000 },
-    { vendor: 'groq', model: 'meta-llama/llama-4-maverick-17b-128e-instruct', timeoutMs: 30000 },
-  ],
+  vision: [],
 };
 
 const VENDOR = {
@@ -174,7 +180,7 @@ function cleanText(raw) {
  * 直接把**同一個 opts** 交給橋接重跑，兩邊形狀不一樣的話那個退路就是壞的，
  * 而且只有在雲端失敗的時候才會發現。
  */
-function toMessages({ system, messages, prompt, imageDataUrl }) {
+function toMessages({ system, messages, prompt }) {
   const systemText = Array.isArray(system)
     ? system.map((b) => b?.text || '').filter(Boolean).join('\n\n')
     : String(system || '');
@@ -194,30 +200,13 @@ function toMessages({ system, messages, prompt, imageDataUrl }) {
     out.push({ role: 'user', content: String(prompt) });
   }
 
-  // 圖片掛在**最後一則使用者訊息**上，content 換成 OpenAI 的區塊陣列格式。
-  // 掛在最後一則是因為那就是「這次要問的問題」——放在前面的話，
-  // 模型容易把圖片當成背景資料而不是要看的東西。
-  if (imageDataUrl) {
-    const lastUser = [...out].reverse().find((m) => m.role === 'user');
-    if (lastUser) {
-      lastUser.content = [
-        { type: 'text', text: String(lastUser.content) },
-        { type: 'image_url', image_url: { url: imageDataUrl } },
-      ];
-    } else {
-      out.push({
-        role: 'user',
-        content: [{ type: 'image_url', image_url: { url: imageDataUrl } }],
-      });
-    }
-  }
   return out;
 }
 
-function buildBody({ system, messages, prompt, imageDataUrl, model, maxTokens, temperature, stream }) {
+function buildBody({ system, messages, prompt, model, maxTokens, temperature, stream }) {
   return {
     model,
-    messages: toMessages({ system, messages, prompt, imageDataUrl }),
+    messages: toMessages({ system, messages, prompt }),
     max_tokens: maxTokens || 800,
     temperature: temperature === undefined ? 0.3 : temperature,
     stream: !!stream,
@@ -306,7 +295,7 @@ function candidates(role, keys) {
  * 而沒有這份清單就只能猜。
  */
 export async function cloudComplete(opts = {}) {
-  const { system, messages, prompt, imageDataUrl, role = 'answer', maxTokens, temperature } = opts;
+  const { system, messages, prompt, role = 'answer', maxTokens, temperature } = opts;
   const keys = await getKeys();
   const list = candidates(role, keys);
   if (!list.length) {
@@ -320,7 +309,7 @@ export async function cloudComplete(opts = {}) {
     try {
       const text = await callOnce(
         c.url, c.key,
-        buildBody({ system, messages, prompt, imageDataUrl, model: c.model, maxTokens, temperature }),
+        buildBody({ system, messages, prompt, model: c.model, maxTokens, temperature }),
         c.timeoutMs);
       const ms = Date.now() - started;
       if (c.vendor === 'nim') nimCursor = (nimCursor + 1) % VENDOR.nim.keyFields.length;
@@ -336,6 +325,17 @@ export async function cloudComplete(opts = {}) {
         // 金鑰壞掉的話，同一把金鑰的其他候選也不用試了 —— 冷卻久一點避免刷錯誤
         noteRateLimited(c.vendor, c.model, c.keyIndex, 300);
         attempts.push({ vendor: c.vendor, model: c.model, error: `金鑰被拒（${status}）`, status });
+      } else if (status === 404) {
+        // **404 跟 429 是完全不同的事。** 429 是「現在不行，等一下就好」，
+        // 404 是「這個模型名稱不存在」—— 再等一萬年也不會出現。
+        // 不冷卻的話，每一次呼叫都會重新撞一遍整條鏈，白花兩個來回的延遲。
+        // 踩過一次：vision 鏈的兩個模型 ID 都寫錯，於是每次勾「附上會議畫面」
+        // 都先浪費兩次 404 才退到橋接。
+        noteRateLimited(c.vendor, c.model, c.keyIndex, 300);
+        attempts.push({
+          vendor: c.vendor, model: c.model, status,
+          error: '模型名稱不存在（404）—— 可能已下架或改名，請更新候選鏈',
+        });
       } else {
         attempts.push({ vendor: c.vendor, model: c.model, error: String(err.message || err), status });
       }
@@ -363,7 +363,7 @@ export async function cloudComplete(opts = {}) {
  *   已經吐字 → 就地把這一段收尾回傳，不丟例外
  */
 export async function cloudStream(opts = {}) {
-  const { system, messages, prompt, imageDataUrl, role = 'answer', maxTokens, temperature, onDelta } = opts;
+  const { system, messages, prompt, role = 'answer', maxTokens, temperature, onDelta } = opts;
   const keys = await getKeys();
   const list = candidates(role, keys);
   if (!list.length) {
@@ -375,7 +375,7 @@ export async function cloudStream(opts = {}) {
   const attempts = [];
   for (const cand of list) {
     try {
-      return await streamOnce(cand, { system, messages, prompt, imageDataUrl, maxTokens, temperature, onDelta });
+      return await streamOnce(cand, { system, messages, prompt, maxTokens, temperature, onDelta });
     } catch (err) {
       if (err instanceof StreamStarted) throw err.inner;   // 已經吐字，不重試
       attempts.push({ vendor: cand.vendor, model: cand.model, error: String(err.message || err), status: err.status || 0 });
@@ -390,7 +390,7 @@ class StreamStarted extends Error {
   constructor(inner) { super('串流已開始'); this.inner = inner; }
 }
 
-async function streamOnce(c, { system, messages, prompt, imageDataUrl, maxTokens, temperature, onDelta }) {
+async function streamOnce(c, { system, messages, prompt, maxTokens, temperature, onDelta }) {
   let emitted = false;
   // full 宣告在 try 外面：catch 裡要拿它把已經收到的部分收尾回傳
   let full = '';
@@ -406,7 +406,7 @@ async function streamOnce(c, { system, messages, prompt, imageDataUrl, maxTokens
         Accept: 'text/event-stream',
       },
       body: JSON.stringify(buildBody({
-        system, messages, prompt, imageDataUrl, model: c.model, maxTokens, temperature, stream: true,
+        system, messages, prompt, model: c.model, maxTokens, temperature, stream: true,
       })),
       signal: ctrl.signal,
     });

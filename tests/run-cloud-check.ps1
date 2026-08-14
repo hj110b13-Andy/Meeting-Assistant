@@ -323,42 +323,40 @@ check('聽對人名「小陳」', text.includes('小陳'), text);
 check('輸出是繁體', isTraditional(text), text);
 results.push('      [辨識 ' + cloudModel + '] ' + text);
 
-// ══ 4.5 視覺模型：「附上會議畫面」那條路 ══════════════════════
+// ══ 4.5 候選鏈裡的模型 ID 真的都還在 ══════════════════════════
 //
-// 這條路原本只有 Claude Code 橋接（雲端模型看不懂圖片），但橋接依賴
-// claude.exe 的絕對路徑，Claude Code 的 VS Code 擴充功能一更新就失效 ——
-// 症狀是「勾了附上會議畫面就出錯，不勾就正常」。Groq 的 llama-4 看得懂
-// 圖片而且一樣免費，所以現在雲端自己處理。
+// **踩過一次，而且很難發現。** 為了讓「附上會議畫面」不必依賴 Claude Code
+// 橋接，一度加了一條 vision 候選鏈，填的是 meta-llama/llama-4-scout 與
+// …-maverick —— 兩個都回 404，因為 Groq 根本沒有那些模型。
 //
-// **模型 ID 只有打真的 API 才驗得到。** 合成測試用的是 stub，
-// 模型下架或改名時照樣全綠，而實際使用會回 404 —— 而且是在使用者
-// 正在開會、剛勾了附上會議畫面的那一刻才發現。
+// 難發現的原因是 **404 在畫面上跟「額度用完」長得一模一樣**：都是
+// 「雲端後端暫時不可用，改用 Claude Code」，使用者只會覺得今天特別慢。
+// 而合成測試用的是 stub，根本不檢查模型名稱，所以照樣全綠。
+//
+// 所以這裡直接問 Groq「你有哪些模型」，再比對候選鏈裡寫的那些還在不在。
+// 模型下架或改名的那一天，這一項會變紅 —— 而不是等到開會時才發現。
 {
-  // 一張 8x8 的純色 PNG 就夠驗「圖片收得下、模型答得出來」。
-  // 不用真截圖：這裡驗的是請求形狀與模型可用性，不是辨識品質。
-  const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAAI0lEQVR4nGP'
-    + '8z8DAwMDAxIAKGBmZGBgYGBiYGBkYGBgYGAAAKgAB0gAAAAASUVORK5CYII=';
-  step('打 Groq 的視覺模型（附上會議畫面用）');
-  let visionOk = false; let visionErr = ''; let visionModel = '';
-  try {
-    const r = await window.__module_cloud.cloudComplete({
-      role: 'vision',
-      maxTokens: 64,
-      temperature: 0,
-      imageDataUrl: png,
-      system: '你會看圖回答。全部使用繁體中文。',
-      messages: [{ role: 'user', content: '這張圖片主要是什麼顏色？只回答顏色。' }],
-    });
-    visionOk = !!r.text.trim();
-    visionModel = r.model;
-    results.push('      [視覺 ' + r.model + '] ' + r.text.trim().slice(0, 60));
-  } catch (err) {
-    visionErr = String(err.message || err);
+  step('比對候選鏈裡的模型 ID 還在不在');
+  const res = await fetch('https://api.groq.com/openai/v1/models', {
+    headers: { Authorization: 'Bearer ' + REAL_KEYS.groq },
+  });
+  const list = await res.json();
+  const ids = (list.data || []).map((m) => m.id);
+  check('問得到 Groq 的模型清單', ids.length > 0, JSON.stringify(list).slice(0, 200));
+
+  // 候選鏈是寫死的字串，這裡把它們挖出來逐一比對
+  const used = new Set();
+  for (const chain of Object.values(window.__module_cloud.CHAINS || {})) {
+    for (const c of chain) if (c.vendor === 'groq') used.add(c.model);
   }
-  check('視覺模型打得通（模型 ID 還在、圖片收得下）', visionOk,
-    visionErr || '（沒有回應）');
-  check('用的是免費方案的 llama-4（不是按量計費的模型）',
-    !visionOk || visionModel.includes('llama-4'), visionModel);
+  // 辨識用的模型不在 CHAINS 裡（那條走 offscreen），單獨補上
+  used.add('whisper-large-v3-turbo');
+
+  const missing = [...used].filter((m) => !ids.includes(m));
+  check('候選鏈裡每一個 Groq 模型都還存在',
+    missing.length === 0,
+    '這些已經不在了：' + missing.join('、') + ' ／ 現有的：' + ids.join('、'));
+  results.push('      [Groq 模型] 用到 ' + used.size + ' 個，帳號有 ' + ids.length + ' 個');
 }
 
 // ══ 5. Tavily 查證 ════════════════════════════════════════════

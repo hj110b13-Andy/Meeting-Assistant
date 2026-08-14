@@ -37,11 +37,11 @@ export const BUDGET = {
   // 但**額度是以 token 計的**（Groq 免費方案每天 10 萬），所以這裡的上限
   // 不是模型的極限，是「不要在一場會議裡把一整天的額度花光」——
   // 摘要每 5 分鐘一次，一小時 12 次 × 約 8000 字，剛好在安全範圍內。
-  // supportsImages: Groq 的 llama-4 系列看得懂圖片，而且一樣是免費方案，
-  // 所以「附上會議畫面」不必再升級到橋接（見 cloud.js 的 vision 候選鏈）。
-  // 原本這裡是 false，於是勾了附畫面就一定走橋接 —— 而橋接依賴 claude.exe
-  // 的絕對路徑，Claude Code 一更新就失效，症狀是「勾了就出錯，不勾就正常」。
-  cloud:         { transcript: { answer: 8000, summary: 16000 }, supportsImages: true,  structuredJson: false, streams: true,  fast: true },
+  // supportsImages: false —— **Groq 沒有任何視覺模型**（實際問過 /models，
+  // 見 cloud.js 的 vision 候選鏈與 tools\list-groq-models.ps1）。
+  // 曾經改成 true 並填了 llama-4 的模型名稱，結果兩個都回 404。
+  // 所以「附上會議畫面」仍然要升級到 Claude Code 橋接。
+  cloud:         { transcript: { answer: 8000, summary: 16000 }, supportsImages: false, structuredJson: false, streams: true,  fast: true },
 };
 
 export async function budget(role = 'summary') {

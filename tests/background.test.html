@@ -309,6 +309,51 @@ window.store = window.__module_store;
   await settle(); await settle(); await settle();
   check('點名我時觸發回答建議', got('answer').length === 1, `${got('answer').length} 則`);
 
+  // ── 名字和問句分在不同段落時仍然要觸發 ──────────────────────
+  //
+  // **這是實測回報的迴歸。** 逐字稿改成「一句一段」（為了讓每一句各自對上
+  // 說話者）之後，原本會自動回答的問題突然都不回答了 —— 因為在那之前
+  // 一整塊 28 秒的音訊是**一個**段落，名字和問句剛好都在裡面。切細之後
+  // 那個巧合就不見了，而人本來就不會把名字和問題塞進同一句話：
+  //
+  //   「小陳，」→「成本優勢明顯，」→「這個是在哪裡體現？」
+  //
+  // 所以「有沒有點到我」要看前後一小段對話，不能只看這一段。
+  const splitBefore = got('answer').length;
+  const t0 = Date.now();
+  const part = (id, text, offset) => ({
+    type: 'ma:segment',
+    payload: { id, speaker: '李美華', text, final: true, ts: t0 + offset, startedAt: t0 + offset,
+      source: 'audio', platform: 'audio-fallback', sessionId: 'sess1', title: '週會' },
+  });
+  await send(part('sp1', '小陳，', 0));
+  await send(part('sp2', '成本優勢明顯，', 1500));
+  await send(part('sp3', '這個是在哪裡體現？', 3000));
+  await settle(); await settle(); await settle();
+  check('名字在前一句、問句在後一句時仍然自動回答',
+    got('answer').length === splitBefore + 1,
+    `多了 ${got('answer').length - splitBefore} 則`);
+  check('回答卡片上的問題是那個問句本身，不是整塊 28 秒的內容',
+    got('answer').at(-1)?.payload.question === '這個是在哪裡體現？',
+    got('answer').at(-1)?.payload.question);
+
+  // 一塊音訊會切成好幾句，其中可能有兩三句都像問句 —— 沒有這道防線的話
+  // 同一次「有人問你」會產生兩三張卡片，每一張都燒一次額度。
+  const throttleBefore = got('answer').length;
+  await send(part('sp4', '那有沒有數字可以看？', 4000));
+  await settle(); await settle();
+  check('同一次點名只回答一次（一塊音訊切成好幾句，可能有兩三句都像問句）',
+    got('answer').length === throttleBefore,
+    `多了 ${got('answer').length - throttleBefore} 則`);
+
+  // 超過 20 秒就不算同一段對話了，名字不該無限期地「延續」下去
+  const farBefore = got('answer').length;
+  await send(part('sp5', '這個要怎麼處理？', 60000));
+  await settle(); await settle();
+  check('離點名太久的問句不觸發（名字不會無限期延續）',
+    got('answer').length === farBefore,
+    `多了 ${got('answer').length - farBefore} 則`);
+
   // ── 介面文字不該進逐字稿 ────────────────────────────────────
   // 選擇器失效時抓到的是 Meet 自己的 UI。實測那份逐字稿裡真的出現過
   // 「arrow_downward跳到底部」—— 混進去會一路汙染摘要與回答建議。
@@ -775,59 +820,39 @@ window.store = window.__module_store;
   check('雲端一樣是免費的（免費方案，不是按量計費）', withKeys?.free === true);
   check('回報金鑰已設定', withKeys?.cloudConfigured === true);
 
-  // ── 附上會議畫面：雲端自己看得懂，不必升級到橋接 ────────────────
+  // ── 附上會議畫面：雲端沒有視覺模型，所以要升級到橋接 ────────────
   //
-  // 原本一律升級到 Claude Code，因為雲端模型看不懂圖片。實測踩到的問題是
-  // 橋接依賴 claude.exe 的**絕對路徑**，而 Claude Code 的 VS Code 擴充功能
-  // 會自動更新到新的版號資料夾 —— 舊路徑失效之後，使用者看到的是
-  // 「勾了附上會議畫面就出錯，不勾就正常」，完全聯想不到是別的軟體更新造成的。
-  // Groq 的 llama-4 看得懂圖片而且一樣免費，所以現在雲端自己處理。
+  // 這裡一度改成「雲端自己看」，填了 meta-llama/llama-4-scout 與 …-maverick，
+  // **兩個都回 404**。實際去問 Groq 的 /models（tools\list-groq-models.ps1）
+  // 得到的 15 個模型裡一個視覺模型都沒有：只有兩支 whisper、llama-3.1/3.3、
+  // gpt-oss、qwen3.6、compound。所以看畫面仍然只有橋接做得到。
+  //
+  // 這一項守的是「不要再猜一次模型名稱」：名稱錯的症狀是 404，
+  // 而 404 在畫面上跟「額度用完」長得很像（都是「雲端不能用，改走退路」），
+  // 使用者只會覺得變慢了。
   SETTINGS.provider = 'cloud';
   window.__fetches.length = 0;
   window.__captures.length = 0;
-  const dlBefore = window.__downloads.length;
   const visionBridgeBefore = window.__native.posted.length;
   await send({ type: 'ma:ask', question: '畫面上那張圖的數字是多少？', withScreen: true });
   await settle(); await settle(); await settle();
 
-  const visionCall = window.__fetches.find((f) => String(f.url).includes('groq')
-    && JSON.stringify(f.body?.messages || '').includes('image_url'));
-  check('附畫面時雲端自己處理，不必動用橋接',
-    !!visionCall, JSON.stringify(window.__fetches.map((f) => f.body?.model)));
-  check('用的是看得懂圖片的模型',
-    String(visionCall?.body?.model || '').includes('llama-4'), String(visionCall?.body?.model));
-  check('圖片以 base64 data URL 送出（雲端讀不到檔案路徑）',
-    JSON.stringify(visionCall?.body?.messages || '').includes('data:image/jpeg;base64,'),
-    JSON.stringify(visionCall?.body?.messages || '').slice(0, 200));
-  // PNG 的整頁截圖 base64 之後會脹到撞上請求大小上限，而失敗訊息不會
-  // 告訴你是圖片太大 —— 會議畫面是簡報和人臉，JPEG 品質 70 完全夠讀。
-  check('截圖用 JPEG 而不是 PNG（PNG 太大會撞到請求上限）',
-    window.__captures.some((c) => c.format === 'jpeg'),
-    JSON.stringify(window.__captures));
-  check('走雲端時不落地存檔（那只是多一次磁碟往返，還會塞滿下載資料夾）',
-    window.__downloads.length === dlBefore,
-    `多了 ${window.__downloads.length - dlBefore} 個檔案`);
-  check('走雲端時完全不碰橋接',
-    window.__native.posted.length === visionBridgeBefore,
-    JSON.stringify(window.__native.posted.slice(visionBridgeBefore).map((m) => m.type)));
-  // 圖片要掛在最後一則使用者訊息上 —— 那就是「這次要問的問題」。
-  // 掛在前面的話模型容易把它當成背景資料而不是要看的東西。
-  const lastMsg = (visionCall?.body?.messages || []).filter((m) => m.role === 'user').pop();
-  check('圖片掛在最後一則使用者訊息上（跟問題在一起）',
-    Array.isArray(lastMsg?.content)
-    && lastMsg.content.some((b) => b.type === 'text' && b.text.includes('畫面上那張圖'))
-    && lastMsg.content.some((b) => b.type === 'image_url'),
-    JSON.stringify(lastMsg).slice(0, 200));
+  check('雲端不會被當成看得懂圖片（Groq 沒有任何視覺模型）',
+    !window.__fetches.some((f) => JSON.stringify(f.body?.messages || '').includes('image_url')),
+    JSON.stringify(window.__fetches.map((f) => f.body?.model)));
+  const visionRun = window.__native.posted.slice(visionBridgeBefore).find((m) => m.type === 'run');
+  check('附畫面時升級到橋接，並把截圖路徑交給它',
+    !!visionRun?.imagePath, JSON.stringify(visionRun?.imagePath || null));
+  check('有告訴使用者為什麼換了後端（雲端 0.7 秒，橋接 10–30 秒）',
+    got('answerNote').some((n) => n.payload.note.includes('看不懂圖片')),
+    JSON.stringify(got('answerNote').slice(-3).map((n) => n.payload.note)));
 
-  // 沒勾就不該白白截圖，也不該走 vision 那條鏈（那是不同的模型與額度桶）
+  // 沒勾就不該白白截圖
   window.__fetches.length = 0;
   window.__captures.length = 0;
   await send({ type: 'ma:ask', question: '不用看畫面' });
   await settle(); await settle();
   check('沒勾附畫面時不截圖', window.__captures.length === 0, JSON.stringify(window.__captures));
-  check('沒勾附畫面時不會用到視覺模型（額度分桶，別亂花）',
-    !window.__fetches.some((f) => String(f.body?.model || '').includes('llama-4')),
-    JSON.stringify(window.__fetches.map((f) => f.body?.model)));
 
   // 輸入框空著時回頭測已儲存的那把
   window.__fetches.length = 0;
