@@ -362,40 +362,79 @@ powershell -ExecutionPolicy Bypass -File tools\install-whisper.ps1
 
 ### 換一台電腦：從 clone 到能用
 
-前提：**Windows**、已安裝並登入 **Claude Code**、有 **Chrome 或 Edge**。
+前提：有 **Chrome 或 Edge**。（Windows 與 Claude Code 只有下面的「選配」才需要。）
+
+**真正必要的只有三步**，兩三分鐘：
 
 ```powershell
+# ① clone
 git clone https://github.com/hj110b13-Andy/Meeting-Assistant.git
-cd Meeting-Assistant
-
-# ① 本機語音辨識（沒有字幕的會議才用得到，但建議先裝，約 260 MB）
-powershell -ExecutionPolicy Bypass -File tools\install-whisper.ps1
 ```
 
-**② 載入擴充功能**：`chrome://extensions` → 右上角開啟「開發人員模式」→「載入未封裝項目」→ 選剛 clone 下來的資料夾 → **把卡片上顯示的擴充功能 ID 抄下來**。
+**② 載入擴充功能**：`chrome://extensions` → 右上角開啟「開發人員模式」→
+「載入未封裝項目」→ 選剛 clone 下來的資料夾。
+（**這步不能省，也沒有辦法自動化** —— clone 完 Chrome 並不知道有這個資料夾。）
+
+**③ 設定頁填兩樣東西**：`chrome://extensions` → 這個擴充功能 → 詳細資料 →
+擴充功能選項。貼上 **Groq 金鑰**（按旁邊的「測試」確認），填**你的名字／稱呼**，
+按頁面最下面的**「儲存設定」——只有這一顆，它存整頁的內容**。
+
+這樣就能用了。**這兩欄各自漏掉的後果不一樣，都看不出是設定造成的**：
+沒有金鑰 → 逐字稿慢 8 倍、回答從 1 秒變成 10–30 秒（側邊欄會主動說一次）；
+名字空白 → 別人點名問你時**完全不會觸發**回答建議，而畫面上只是「安靜地什麼都沒發生」。
+
+> 金鑰不在 git 裡（這個 repo 是公開的），所以**每一台都要自己貼一次**。
+> 同一組金鑰可以在多台電腦共用，不必重新申請。
+
+#### 選配：三條退路，不裝也能用
+
+下面三個都只是「雲端不能用時」的備援。**一開始可以全部跳過**，
+之後覺得需要再補；side panel 在用到而沒裝時會明確告訴你原因與怎麼修。
 
 ```powershell
-# ③ 註冊 Claude Code 橋接（摘要與問答要用；ID 就是上一步抄的）
-powershell -ExecutionPolicy Bypass -File bridge\install.ps1 -ExtensionId <剛抄的ID>
+# 本機語音辨識（約 260 MB）：Groq 金鑰沒填或額度用完時接手。只支援 Windows
+powershell -ExecutionPolicy Bypass -File tools\install-whisper.ps1
+
+# Claude Code 橋接：雲端整條掛掉時的最後退路（一次要 10–30 秒，所以只是退路）。
+# 需要已安裝並登入 Claude Code。ID 在 chrome://extensions 的卡片上，
+# **一定要在載入擴充功能之後才拿得到**（ID 由資料夾路徑決定，換一台就不同）
+powershell -ExecutionPolicy Bypass -File bridge\install.ps1 -ExtensionId <卡片上的ID>
+
+# vendor/（99 MB）：WASM 辨識引擎，上面那個原生的裝不起來時才用得到
+powershell -ExecutionPolicy Bypass -File tools\fetch-vendor.ps1
 ```
 
-**④ 設定頁一次填完**：「API 金鑰」至少貼上 **Groq** 那一把（按旁邊的「測試」確認），再填「我的名字／稱呼」與「我的背景筆記」，最後按頁面最下面的**「儲存設定」——只有這一顆，它存整頁的內容**。金鑰這一步影響最大：沒有它逐字稿慢 8 倍、回答從 1 秒變成 10–30 秒。名字空白的話自動回答幾乎不會觸發。金鑰不在 git 裡（這個 repo 是公開的），所以每一台都要自己貼。
+#### 開始開會時還有兩件事
 
-順序不能顛倒：**③ 一定要在 ② 之後**，因為擴充功能 ID 要先載入才拿得到。
+這兩件跟安裝無關，是**每次**（或每個分頁）都要的：
 
-#### 為什麼這幾步不能省
+1. **在會議分頁點一下工具列的擴充功能圖示。** Chrome 只接受從這裡發起的音訊
+   擷取，沒有別的辦法（詳見下方「音訊擷取只能從點圖示啟動」）。
+2. **第一次會跳麥克風權限詢問** —— 那是用來記錄**你自己**說的話。
+   拒絕的話其他人的發言照常記錄。
 
-| 東西 | 為什麼不跟著 git 走 |
+#### 為什麼這些東西不跟著 git 走
+
+| 東西 | 原因 |
 |---|---|
 | **API 金鑰** | **這個 repo 是公開的。** 金鑰推上去一次就等於外洩 —— 就算之後 commit 刪掉，GitHub 仍保留那個 blob，掃描機器人幾分鐘內就會撿走，只能重新簽發。所以金鑰只存在該台瀏覽器的 `chrome.storage.local` |
 | `bridge/config.json`、`bridge/manifest.json` | 帶著該台電腦上 `claude.exe` 的絕對路徑與擴充功能 ID。**擴充功能 ID 由資料夾路徑決定**，換一台就變，所以只能各自產生 |
-| 原生語音辨識（約 260 MB） | 裝在該台的 `%LOCALAPPDATA%\MeetingAssistant\whisper`。**必須是純 ASCII 路徑**，見上方 whisper.cpp 的說明 |
+| 原生語音辨識（約 260 MB，選配） | 裝在該台的 `%LOCALAPPDATA%\MeetingAssistant\whisper`。**必須是純 ASCII 路徑**，見上方 whisper.cpp 的說明 |
 | `vendor/`（99 MB） | WASM 備援引擎，沒進版控。裝了原生的就用不到；真的要的話跑 `tools\fetch-vendor.ps1` |
 | 「我的名字」「背景筆記」等設定 | 存在該台瀏覽器的 `chrome.storage.local` |
 
-沒裝任何語音引擎也不會壞 —— 只是遇到沒有字幕的會議時，「聽會議聲音」會失敗並在側邊欄說明原因。字幕、逐字稿、摘要、問答都不受影響。
+**一個本機引擎都不裝也完全正常** —— 有 Groq 金鑰的話辨識整條走雲端，
+而且比本機快 8 倍、中文也更準。本機引擎是「金鑰沒填或額度用完」時的接手，
+不是必需品。
 
-**作業系統限制**：擴充功能核心（字幕擷取、逐字稿、摘要、問答）跨平台；但**橋接與本機語音辨識目前只支援 Windows**，因為安裝腳本是 PowerShell、原生辨識用的是 Windows 版 whisper.cpp。macOS／Linux 上只有 Chrome 內建模型可用（即時回答），摘要與本機辨識需要移植安裝腳本。
+**作業系統限制**：主要路線（字幕擷取、雲端辨識、摘要、問答）**全部是 HTTP 與
+瀏覽器 API，跨平台**，所以 macOS／Linux 上照樣完整可用 —— 只要載入擴充功能
+再貼上 Groq 金鑰就好。**只有那兩條退路綁 Windows**（安裝腳本是 PowerShell、
+原生辨識用的是 Windows 版 whisper.cpp）。
+
+> 順帶一提：Chrome 內建的 Gemini Nano **不能**當退路 —— 它的 `outputLanguage`
+> 支援清單只有 `[de, en, es, fr, ja]`，**不支援中文輸出**。這是個中文會議助手，
+> 回答要能照唸，所以那條路碼還留著但預設關閉。
 
 ### 在另一台電腦上改這個專案
 
