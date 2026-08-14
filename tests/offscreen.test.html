@@ -19,6 +19,7 @@ window.chrome = {
 <!-- 順序要和 offscreen.html 一致：轉換表先載入，offscreen.js 才看得到 toTraditional -->
 <script src="s2t-table.js"></script>
 <script src="s2t.js"></script>
+<script src="voiceprint.js"></script>
 <script src="offscreen.js"></script>
 
 <script>
@@ -370,6 +371,126 @@ check('本機引擎的純字串照舊處理（沒有 parts 也要能用）',
   sent.filter((m) => m.type === 'ma:segment').length === 1
   && sent.find((m) => m.type === 'ma:segment')?.payload.text === '本機引擎回的是一整段字串。',
   JSON.stringify(sent.filter((m) => m.type === 'ma:segment').map((m) => m.payload.text)));
+
+// ── 聲紋分離：把不同的聲音分開 ──────────────────────────────────
+//
+// 這是「顯示誰在說話」最後一條、也是唯一不依賴畫面的路。
+// 字幕要使用者自己開；發言指示器在**看共享畫面時完全不存在**
+// （Teams／Meet 那時不顯示視訊磚）—— 而共享畫面正是最需要逐字稿的場合。
+// 聲紋只看聲音，所以那些情況全都不影響它。
+//
+// **合成的聲音證明的是「演算法會把不同音色分開、把同音色歸在一起」，
+// 不能證明真人的聲音一定分得開。** 真人的驗證只能在真實會議裡做。
+{
+  const vp = globalThis.__MA_VOICEPRINT__;
+  check('voiceprint.js 有載入', !!vp && typeof vp.embed === 'function');
+
+  // 合成「人聲」：基頻 + 幾個泛音，泛音的強度分佈就是音色。
+  // 兩個人的差別做成「基頻不同 + 共振峰不同」，那正是真人聲音的主要差異。
+  const synth = (f0, formants, seconds = 1.2, seed = 1) => {
+    const n = Math.round(TARGET_RATE * seconds);
+    const out = new Float32Array(n);
+    let rnd = seed;
+    const noise = () => { rnd = (rnd * 1103515245 + 12345) & 0x7fffffff; return (rnd / 0x7fffffff) - 0.5; };
+    for (let i = 0; i < n; i++) {
+      const t = i / TARGET_RATE;
+      let v = 0;
+      for (let h = 1; h <= 20; h++) {
+        const freq = f0 * h;
+        // 共振峰：靠近 formant 中心的泛音放大，那是音色的來源
+        let gain = 1 / h;
+        for (const f of formants) gain *= 1 + 2.5 * Math.exp(-((freq - f) ** 2) / (2 * 180 ** 2));
+        v += gain * Math.sin(2 * Math.PI * freq * t);
+      }
+      // 一點雜訊與音量起伏，讓它不是完美的週期訊號
+      out[i] = 0.25 * v * (0.8 + 0.2 * Math.sin(2 * Math.PI * 3 * t)) + 0.01 * noise();
+    }
+    return out;
+  };
+
+  const voiceA1 = synth(120, [700, 1200], 1.2, 7);    // 低沉
+  const voiceA2 = synth(122, [710, 1180], 1.4, 99);   // 同一個人，另一句話
+  const voiceB1 = synth(210, [500, 2100], 1.3, 31);   // 高亢、共振峰完全不同
+
+  const eA1 = vp.embed(voiceA1, TARGET_RATE);
+  const eA2 = vp.embed(voiceA2, TARGET_RATE);
+  const eB1 = vp.embed(voiceB1, TARGET_RATE);
+  check('算得出聲紋向量', !!eA1 && eA1.length === 26, eA1 ? String(eA1.length) : 'null');
+
+  const same = vp.cosine(eA1, eA2);
+  const diff = vp.cosine(eA1, eB1);
+  check('同一個人的兩句話比較像，不同人的比較不像',
+    same > diff, `同人 ${same.toFixed(3)} vs 不同人 ${diff.toFixed(3)}`);
+
+  // 太短、或幾乎全靜音的段落要回 null，不能回一個亂猜的向量 ——
+  // 亂猜會污染分群中心，錯一次之後整場都跟著錯。
+  check('太短的音訊不給答案（寧可沒有，也不要亂猜）',
+    vp.embed(new Float32Array(200), TARGET_RATE) === null);
+  check('幾乎全靜音的音訊不給答案',
+    vp.embed(new Float32Array(TARGET_RATE), TARGET_RATE) === null);
+
+  // 分群：同一個人歸在一起，不同人分開
+  const book = new vp.SpeakerBook();
+  const a1 = book.assign(eA1);
+  const a2 = book.assign(eA2);
+  const b1 = book.assign(eB1);
+  check('第一句開一個新的講者', a1?.isNew === true && a1.id === 1, JSON.stringify(a1));
+  check('同一個人的第二句歸到同一群',
+    a2?.id === a1?.id, `${JSON.stringify(a1)} vs ${JSON.stringify(a2)}`);
+  check('另一個人開新的一群',
+    b1?.id !== a1?.id, `${JSON.stringify(a1)} vs ${JSON.stringify(b1)}`);
+  check('標籤預設是「講者 N」', book.labelFor(a1.id) === '講者 1', book.labelFor(a1.id));
+
+  // **這條是整個設計的關鍵。** 字幕只要對上過一次，之後同一個聲音
+  // 都叫得出名字 —— 即使字幕後來斷掉、或畫面切到共享畫面沒有視訊磚了。
+  book.nameCluster(a1.id, 'Eden');
+  check('對上一次真名之後，同一群就記住了', book.labelFor(a1.id) === 'Eden', book.labelFor(a1.id));
+  check('別人那一群不受影響', book.labelFor(b1.id) === `講者 ${b1.id}`, book.labelFor(b1.id));
+
+  // 上限：會議不會有 12 個人輪流講，無上限的話雜訊會生出一堆假講者
+  const small = new vp.SpeakerBook({ threshold: 0.999, maxSpeakers: 2 });
+  small.assign(eA1); small.assign(eB1);
+  const third = small.assign(vp.embed(synth(300, [800, 2600], 1.2, 55), TARGET_RATE));
+  check('額滿之後不再開新的講者（併進最近的一群）',
+    small.describe().length === 2 && third?.isNew !== true,
+    JSON.stringify(small.describe()));
+
+  check('算不出來時不會爆', book.assign(null) === null);
+}
+
+// ── 聲紋分群的 id 要送到背景 ────────────────────────────────────
+// 名字的判斷全部留在背景（那裡才有字幕與指示器的資料），offscreen 只回答
+// 「這一段跟前面哪一段是同一個人」。分兩邊是為了讓背景只要對上過一次真名，
+// 之後那一群的每一段都能顯示真名。
+{
+  sent.length = 0;
+  lastResultText = '';
+  toTraditionalOn = false;
+  speakerBook = null;
+  // 一段真的有聲音的音訊，聲紋才算得出來
+  const n = Math.round(TARGET_RATE * 1.5);
+  const voice = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const t = i / TARGET_RATE;
+    voice[i] = 0.3 * (Math.sin(2 * Math.PI * 130 * t) + 0.5 * Math.sin(2 * Math.PI * 700 * t));
+  }
+  handleResult({ text: '這一段有聲音。', parts: [{ start: 0, end: 1.5, text: '這一段有聲音。' }] },
+    1700000400000, voice);
+  const withCluster = sent.find((m) => m.type === 'ma:segment')?.payload;
+  check('段落帶著聲紋分群的 id', withCluster?.cluster >= 1, JSON.stringify(withCluster?.cluster));
+  check('說話者預設標成「講者 N」，不是「其他人」',
+    withCluster?.speaker === `講者 ${withCluster.cluster}`, withCluster?.speaker);
+
+  // 算不出聲紋時要退回原本的引擎標籤，而不是顯示「講者 0」
+  sent.length = 0;
+  lastResultText = '';
+  speakerLabel = '其他人（雲端辨識）';
+  handleResult('沒有音訊可以算聲紋。', 1700000500000, null);
+  const noCluster = sent.find((m) => m.type === 'ma:segment')?.payload;
+  check('算不出聲紋時退回引擎標籤（不是「講者 0」）',
+    noCluster?.speaker === '其他人（雲端辨識）' && noCluster?.cluster === 0,
+    `${noCluster?.speaker} / cluster=${noCluster?.cluster}`);
+}
 
 // ── 持續失敗時不要洗版 ──────────────────────────────────────────
 // 辨識錯誤幾乎都是持續性的（金鑰被拒、額度用完、網路斷掉），一旦發生，

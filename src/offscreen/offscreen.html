@@ -8,4 +8,10 @@
 -->
 <script src="../lib/s2t-table.js"></script>
 <script src="../lib/s2t.js"></script>
+<!--
+  voiceprint.js 也要在 offscreen.js 之前：每一段音訊送去辨識時會順手算一次
+  聲紋，用來判斷「這一段跟前面哪一段是同一個人」。掛在
+  globalThis.__MA_VOICEPRINT__。
+-->
+<script src="voiceprint.js"></script>
 <script src="offscreen.js"></script>

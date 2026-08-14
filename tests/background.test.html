@@ -1152,6 +1152,48 @@ window.store = window.__module_store;
   check('兩次心跳之間的音訊仍然對得上',
     speakerOf('a8') === '林小美', speakerOf('a8'));
 
+  // ── 聲紋分群 ＋ 一次對上名字，之後就記住 ──────────────────────
+  //
+  // **這是讓姓名撐得住的關鍵。** 字幕和發言指示器都是間歇性的：字幕斷斷續續，
+  // 而切到共享畫面時 Teams／Meet 連視訊磚都不顯示，指示器與名牌一起消失 ——
+  // 偏偏那正是最需要逐字稿的場合。
+  //
+  // 聲紋分群是連續的：同一個人的聲音永遠落在同一群。所以只要在**任何一刻**
+  // 替某一群對上過一次真名，之後那一群的每一段都能顯示真名。
+  // 沒有這張對照表的話，姓名的覆蓋率就等於字幕的覆蓋率，而那個覆蓋率很低。
+  const heardIn = (id, text, startedAt, cluster) => ({
+    type: 'ma:segment',
+    payload: { id, speaker: `講者 ${cluster}`, text, final: true, ts: Date.now(), startedAt,
+      source: 'audio', platform: 'audio-fallback', cluster, sessionId: 'sess-name', title: '音訊備援' },
+  });
+
+  // 這一刻有指示器說是 Eden 在講話，而這段聲音是第 3 群
+  await send({ type: 'ma:speaking', payload: { names: ['Eden'], at: T + 600000 } });
+  await settle();
+  await send(heardIn('v1', '那我開始今天的報告。', T + 600200, 3));
+  await settle();
+  check('有線索時用真名', speakerOf('v1') === 'Eden', speakerOf('v1'));
+
+  // 後來畫面切到共享畫面：沒有視訊磚、沒有指示器、字幕也沒開。
+  // 但同一個聲音（第 3 群）仍然叫得出名字。
+  await send(heardIn('v2', '這一頁是上週的數字。', T + 900000, 3));
+  await settle();
+  check('線索消失之後，同一個聲音仍然顯示真名（這才是重點）',
+    speakerOf('v2') === 'Eden', speakerOf('v2'));
+
+  // 沒對上過的那一群仍然是「講者 N」—— 不能因為記住了一個人就亂猜別人
+  await send(heardIn('v3', '我補一個數字。', T + 900500, 5));
+  await settle();
+  check('沒對上過的聲音仍然是「講者 N」，不會被亂安名字',
+    speakerOf('v3') === '講者 5', speakerOf('v3'));
+
+  // 同一群後來對上了不同的名字（分群錯了、或換人用同一支麥克風）→ 以當下為準
+  await send({ type: 'ma:speaking', payload: { names: ['林小美'], at: T + 950000 } });
+  await settle();
+  await send(heardIn('v4', '換我講。', T + 950200, 5));
+  await settle();
+  check('當下的線索優先於記住的名字', speakerOf('v4') === '林小美', speakerOf('v4'));
+
   // 選擇器失效時「說話者」會抓到介面文字，那絕對不能被安到某段音訊頭上
   await send(cap('c3', 'arrow_drop_down', '展開', T + 200000, T + 200000));
   await send(heard('a5', '這句話沒有可信的姓名來源。', T + 200500));

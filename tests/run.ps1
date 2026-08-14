@@ -35,6 +35,7 @@ Copy-Item (Join-Path $root 'src\content\teams.js')    $tmp -Force
 Copy-Item (Join-Path $root 'src\content\jitsi.js')    $tmp -Force
 Copy-Item (Join-Path $root 'src\sidepanel\panel.js')  $tmp -Force
 Copy-Item (Join-Path $root 'src\offscreen\offscreen.js') $tmp -Force
+Copy-Item (Join-Path $root 'src\offscreen\voiceprint.js') $tmp -Force
 Copy-Item (Join-Path $root 'src\lib\s2t.js')           $tmp -Force
 Copy-Item (Join-Path $root 'src\lib\s2t-table.js')     $tmp -Force
 Copy-Item (Join-Path $root 'src\sidepanel\panel.css') $tmp -Force

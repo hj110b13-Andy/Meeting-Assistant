@@ -404,6 +404,34 @@ function looksLikeChrome(text) {
 }
 
 /**
+ * 聲紋分群 → 真實姓名。
+ *
+ * **這是讓姓名「撐得住」的關鍵。** 字幕和發言指示器都是間歇性的：字幕斷斷續續、
+ * 切到共享畫面時連視訊磚都沒有。但聲紋分群是連續的 —— 同一個人的聲音永遠
+ * 落在同一群。所以只要在**任何一刻**替某一群對上過一次真名，
+ * 之後那一群的每一段都能顯示真名，即使那一刻之後字幕就再也沒出現過。
+ *
+ * 反過來說：**沒有這張對照表的話，姓名的覆蓋率等於字幕的覆蓋率**，
+ * 而實測那個覆蓋率很低。
+ */
+const clusterNames = new Map();
+
+function resolveSpeakerName(seg) {
+  const at = seg.startedAt || seg.ts || Date.now();
+  const live = speakerAt(at);          // 這一刻字幕／指示器說是誰
+  const cluster = Number(seg.cluster) || 0;
+
+  if (live) {
+    // 學起來。之後同一個聲音就算沒有字幕也叫得出名字。
+    if (cluster) clusterNames.set(cluster, live);
+    return live;
+  }
+  // 這一刻沒有線索，但這個聲音以前對上過
+  if (cluster && clusterNames.has(cluster)) return clusterNames.get(cluster);
+  return null;                          // 保留 offscreen 給的「講者 N」
+}
+
+/**
  * 這個時間點字幕記到的是誰在講話；不知道就回傳 null。
  *
  * 先找「時間點真的落在區間裡」的，那是確定的答案。都沒有才退而求其次
@@ -451,9 +479,10 @@ async function onSegment(seg) {
     if (looksLikeChrome(seg.text)) return;
   }
 
-  // 本機辨識標的是「其他人（本機辨識）」這類佔位字串，能對上字幕就換成真名
+  // 音訊段落標的是「講者 N」（聲紋分群）或「其他人（雲端辨識）」（算不出來），
+  // 能對上真名就換掉。
   if (seg.source === 'audio') {
-    const real = speakerAt(seg.startedAt || seg.ts || Date.now());
+    const real = resolveSpeakerName(seg);
     if (real) seg = { ...seg, speaker: real };
   }
 

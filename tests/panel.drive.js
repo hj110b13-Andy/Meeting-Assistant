@@ -247,7 +247,7 @@
   });
   await tick();
   check('沒有真名時說明為什麼，而且給出這個平台的具體步驟',
-    txt('#transcript').includes('語音辨識聽不出是誰')
+    txt('#transcript').includes('靠聲音分出來的')
     && txt('#transcript').includes('開啟字幕'),
     txt('#transcript').slice(0, 160));
 
@@ -260,7 +260,7 @@
   });
   await tick();
   check('已經有真名時不再提醒開字幕',
-    !txt('#transcript').includes('語音辨識聽不出是誰'),
+    !txt('#transcript').includes('靠聲音分出來的'),
     txt('#transcript').slice(0, 120));
   // 這才是使用者要的樣子：一句一個人，名字各自標出來
   check('不同的說話者各自顯示自己的名字',

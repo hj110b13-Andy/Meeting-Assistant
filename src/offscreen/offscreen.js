@@ -431,7 +431,10 @@ async function pump() {
   busy = true;
   try {
     const raw = await transcribe(job.audio);
-    handleResult(raw, job.startedAt);
+    // 音訊也一起傳進去：handleResult 要用它算聲紋（判斷這是誰在講話）。
+    // 有逐句時間戳的時候還會照那些秒數把音訊切開，一句算一次 ——
+    // 一塊 28 秒的音訊裡換過三次人是很正常的。
+    handleResult(raw, job.startedAt, job.audio);
     sameError = { message: '', count: 0 };   // 成功一次就把重複計數清掉
   } catch (err) {
     noteTranscribeError(`${engineName === 'groq' ? '雲端' : '本機'}辨識錯誤：${String(err.message || err)}`);
@@ -451,7 +454,7 @@ async function pump() {
  * 全部黏成一段的話，一塊 28 秒的音訊會整段掛在同一個人名下，
  * 而那 28 秒裡換過三次人是很正常的。
  */
-function handleResult(raw, startedAt) {
+function handleResult(raw, startedAt, audio) {
   const parts = Array.isArray(raw?.parts) && raw.parts.length ? raw.parts : null;
   const full = String((raw && raw.text !== undefined ? raw.text : raw) || '').trim();
   if (!full || isNoiseOnly(full)) return;
@@ -463,7 +466,7 @@ function handleResult(raw, startedAt) {
   if (!trimmed) return;
 
   if (!parts) {
-    emitPiece(trimmed, startedAt);
+    emitPiece(trimmed, startedAt, audio);
     return;
   }
 
@@ -479,11 +482,45 @@ function handleResult(raw, startedAt) {
     }
     // 逐句過濾雜訊與幻覺：整段看起來正常，但其中一句可能是 [BLANK_AUDIO]
     if (!text.trim() || isNoiseOnly(text)) continue;
-    emitPiece(text, startedAt + Math.round(p.start * 1000));
+    // 照這一句的秒數把音訊切出來，一句算一次聲紋 —— 這一塊 28 秒裡
+    // 可能換過三次人，整塊算一次的話三個人會被判成同一個。
+    emitPiece(text, startedAt + Math.round(p.start * 1000), sliceAudio(audio, p.start, p.end));
   }
 }
 
-function emitPiece(text, startedAt) {
+/** 依秒數從一整塊音訊裡切出一段。超出範圍時回 null（讓聲紋直接跳過）。 */
+function sliceAudio(audio, startSec, endSec) {
+  if (!audio || !(endSec > startSec)) return null;
+  const from = Math.max(0, Math.floor(startSec * TARGET_RATE));
+  const to = Math.min(audio.length, Math.ceil(endSec * TARGET_RATE));
+  if (to - from < TARGET_RATE * 0.3) return null;   // 太短，聲紋沒有意義
+  return audio.subarray(from, to);
+}
+
+/**
+ * 這一段是誰在講話 —— 用聲紋分群，回傳分群 id。
+ *
+ * **只回 id，不回名字。** 名字的判斷全部留在背景（那裡才有字幕與發言指示器
+ * 的資料），offscreen 只負責回答「這一段跟前面哪一段是同一個人」。
+ * 分成兩邊是因為：背景只要在**任何一刻**替某個分群對上過一次真名，
+ * 之後那一群的每一段都能顯示真名 —— 即使字幕後來斷掉了。
+ *
+ * 算不出來時回 0（例如太短、幾乎全靜音），呼叫端會退回原本的引擎標籤。
+ */
+function speakerCluster(audio) {
+  const vp = globalThis.__MA_VOICEPRINT__;
+  if (!vp || !audio) return 0;
+  if (!speakerBook) speakerBook = new vp.SpeakerBook();
+  try {
+    const hit = speakerBook.assign(vp.embed(audio, TARGET_RATE));
+    return hit ? hit.id : 0;
+  } catch {
+    // 聲紋算錯絕對不能連帶讓逐字稿消失 —— 那是主要功能，這只是加分
+    return 0;
+  }
+}
+
+function emitPiece(text, startedAt, audio) {
   // whisper small 的中文明顯比 base 準，但輸出簡體。在這裡做確定性轉換，
   // 而不是用 initial prompt 引導 —— 實測 prompt 會讓「對帳」變成「對戰」。
   let out = text.trim();
@@ -491,14 +528,17 @@ function emitPiece(text, startedAt) {
     out = globalThis.toTraditional(out);
   }
   if (!out) return;
+
+  const cluster = speakerCluster(audio);
   // id 要含 startedAt：同一塊音訊會在同一毫秒送出好幾句，只用 Date.now()
   // 的話它們會拿到同一個 id，背景的 upsertSegment 會把它們**互相覆蓋**，
   // 28 秒的音訊最後只留下一句。
   emit(`${sessionId}-${startedAt.toString(36)}-${(pieceSeq++).toString(36)}`,
-    speakerLabel, out, true, startedAt);
+    cluster ? `講者 ${cluster}` : speakerLabel, out, true, startedAt, cluster);
 }
 
 let pieceSeq = 0;
+let speakerBook = null;
 
 // ── 雲端 whisper（GroqCloud） ──────────────────────────────────
 /**
@@ -720,7 +760,7 @@ async function startWhisperWasm(streamId, options) {
 }
 
 // ── 回報 ────────────────────────────────────────────────────────
-function emit(id, speaker, text, final, startedAt) {
+function emit(id, speaker, text, final, startedAt, cluster = 0) {
   chrome.runtime.sendMessage({
     type: 'ma:segment',
     payload: {
@@ -729,6 +769,9 @@ function emit(id, speaker, text, final, startedAt) {
       // 逐字稿照 startedAt 排序，本機辨識的延遲才不會把順序弄亂。
       ts: Date.now(), startedAt: startedAt || Date.now(),
       source: 'audio', platform: 'audio-fallback',
+      // 聲紋分群的 id。背景用它把真名記在「同一個聲音」上 ——
+      // 只要對上過一次，之後同一個人的話都會顯示真名。0 表示算不出來。
+      cluster,
       sessionId, title: '音訊備援',
     },
   }, () => void chrome.runtime.lastError);
@@ -763,5 +806,8 @@ function stop() {
   lastResultText = '';
   // 換引擎／重新開始時要清掉，否則新引擎的第一次失敗會被當成舊錯誤的延續而吞掉
   sameError = { message: '', count: 0 };
+  // 換一場會議就換一批人，舊的分群中心會讓新的人被併到舊的「講者 N」裡
+  speakerBook = null;
+  pieceSeq = 0;
   liveBySpeaker.clear();
 }
