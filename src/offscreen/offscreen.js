@@ -123,6 +123,20 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
     reply({ ok: true });
     return false;
   }
+  // 參與者人數是**聲紋分群的上界**。沒有它的話分群會自由生長 ——
+  // 實測出現過「實際只有兩個人講話，卻標出講者 1／2／3」，因為同一個人的
+  // 音高在不同句子之間本來就會起伏，偶爾就超過門檻開了新的一群。
+  // 人數不明（名單讀不到）時傳 0，維持預設上限。
+  if (msg?.type === 'ma:offscreen:speakers') {
+    const max = Number(msg.max) || 0;
+    // 存在獨立的變數裡而不是只寫進 speakerBook：名單通常在**開始聆聽之前**
+    // 就送過來了，而 speakerBook 是第一次算聲紋時才建立的（stop() 會清掉它）。
+    // 只寫進物件的話這個上限會在下一次 stop 之後靜靜消失。
+    speakerMax = max > 0 ? max : 0;
+    if (speakerBook) speakerBook.maxSpeakers = speakerMax || 8;
+    reply({ ok: true, max: speakerMax });
+    return false;
+  }
   if (msg?.type === 'ma:offscreen:stop') {
     stop();
     reply({ ok: true });
@@ -510,7 +524,7 @@ function sliceAudio(audio, startSec, endSec) {
 function speakerCluster(audio) {
   const vp = globalThis.__MA_VOICEPRINT__;
   if (!vp || !audio) return 0;
-  if (!speakerBook) speakerBook = new vp.SpeakerBook();
+  if (!speakerBook) speakerBook = new vp.SpeakerBook({ maxSpeakers: speakerMax || 8 });
   try {
     const hit = speakerBook.assign(vp.analyze(audio, TARGET_RATE));
     return hit ? hit.id : 0;
@@ -539,6 +553,9 @@ function emitPiece(text, startedAt, audio) {
 
 let pieceSeq = 0;
 let speakerBook = null;
+// 參與者人數（我以外）。0 表示名單讀不到，用預設上限。
+// 刻意跟 speakerBook 分開存 —— 見 ma:offscreen:speakers 的說明。
+let speakerMax = 0;
 
 // ── 雲端 whisper（GroqCloud） ──────────────────────────────────
 /**

@@ -156,6 +156,8 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
           // 「為什麼說話者都是『其他人』」
           speakerStrategy: msg.payload.speakerStrategy || '',
         });
+        // 參與者名單是聲紋分群的上界：兩個人的會議不可能有三個講者
+        updateRoster(msg.payload.participants, (await getSettings()).myNames);
         if (changed) pushState(); else broadcast('status', store.getState().status);
         return reply?.({ ok: true });
       }
@@ -416,11 +418,46 @@ function looksLikeChrome(text) {
  */
 const clusterNames = new Map();
 
+/**
+ * 「除了我以外，還有誰在這場會議裡」。
+ *
+ * 這份名單是**分群的上界**：兩個人的會議不可能有三個講者。
+ * 沒有它的話聲紋會自由生長 —— 實測就出現過「實際只有兩個人講話，
+ * 逐字稿卻標出講者 1／2／3」，因為同一個人的音高在不同句子之間
+ * 本來就會起伏，偶爾就超過門檻開了新的一群。
+ *
+ * 而且**只剩一個人的時候根本不需要聲紋**：我以外只有一個人，
+ * 那所有不是我說的話都是他說的。這是最可靠的一條路，
+ * 不依賴字幕、不依賴發言指示器、也不依賴聲音分得開不分得開。
+ */
+let otherParticipants = [];
+
+function updateRoster(participants, myNames) {
+  const mine = (myNames || '').split(/[,，、\s]+/).filter(Boolean);
+  const next = (participants || [])
+    .map((p) => String(p || '').trim())
+    .filter((p) => p && !mine.some((m) => p.includes(m) || m.includes(p)));
+  const changed = next.join('|') !== otherParticipants.join('|');
+  otherParticipants = next;
+  if (!changed) return;
+  // 讓 offscreen 把分群上限收到實際人數。收不到回覆沒關係（還沒開始聆聽）。
+  chrome.runtime.sendMessage(
+    { type: 'ma:offscreen:speakers', max: otherParticipants.length },
+    () => void chrome.runtime.lastError);
+}
+
 function resolveSpeakerName(seg) {
   const at = seg.startedAt || seg.ts || Date.now();
-  const live = speakerAt(at);          // 這一刻字幕／指示器說是誰
   const cluster = Number(seg.cluster) || 0;
 
+  // **只有一個人的時候直接用他的名字。** 不必問聲紋，也不必等字幕 ——
+  // 我以外只有一個人，那所有不是我說的話都是他說的。
+  if (otherParticipants.length === 1) {
+    if (cluster) clusterNames.set(cluster, otherParticipants[0]);
+    return otherParticipants[0];
+  }
+
+  const live = speakerAt(at);          // 這一刻字幕／指示器說是誰
   if (live) {
     // 學起來。之後同一個聲音就算沒有字幕也叫得出名字。
     if (cluster) clusterNames.set(cluster, live);

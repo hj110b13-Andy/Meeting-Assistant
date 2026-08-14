@@ -9,7 +9,9 @@
 const sent = [];
 window.chrome = {
   runtime: {
-    onMessage: { addListener: () => {} },
+    // 攔下 offscreen.js 註冊的 listener，測試才叫得動它
+    // （例如背景送來的分群上界 ma:offscreen:speakers）
+    onMessage: { addListener: (fn) => { window.__onOffscreenMessage = fn; } },
     sendMessage: (m) => { sent.push(m); },
     getURL: (p) => p,
     lastError: undefined,
@@ -482,6 +484,51 @@ check('本機引擎的純字串照舊處理（沒有 parts 也要能用）',
     JSON.stringify(small.describe()));
 
   check('算不出來時不會爆', book.assign(null) === null);
+
+  // 參與者名單是硬上界。實測回報過「實際只有兩個人講話，卻標出講者 1／2／3」——
+  // 同一個人的音高在不同句子之間本來就會起伏，偶爾就超過門檻開了新的一群。
+  const capped = new vp.SpeakerBook({ maxSpeakers: 2 });
+  const ids = new Set();
+  for (const f of [a1, b1, vp.analyze(voice(200, 1.15, 1.2, 55), TARGET_RATE),
+    vp.analyze(voice(95, 0.9, 1.3, 71), TARGET_RATE)]) {
+    const r = capped.assign(f);
+    if (r) ids.add(r.id);
+  }
+  check('上界是 2 時最多只會有兩個講者，即使聲音差很多',
+    ids.size <= 2 && capped.describe().length <= 2,
+    JSON.stringify(capped.describe()));
+}
+
+// ── 分群上界由背景（參與者名單）決定 ────────────────────────────
+// 名單通常在**開始聆聽之前**就送過來了，而 speakerBook 是第一次算聲紋時
+// 才建立的（stop() 會清掉它）。上界只寫進物件的話會在下一次 stop 之後
+// 靜靜消失 —— 所以要存在獨立的變數裡。
+{
+  speakerBook = null;
+  speakerMax = 0;
+  const reply = (r) => { window.__lastReply = r; };
+  window.__onOffscreenMessage({ type: 'ma:offscreen:speakers', max: 2 }, {}, reply);
+  check('收得下背景送來的分群上界', speakerMax === 2, String(speakerMax));
+
+  // 之後才建立的 book 要吃到那個上界
+  const n = Math.round(TARGET_RATE * 1.2);
+  const tone = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const t = i / TARGET_RATE;
+    tone[i] = 0.3 * (Math.sin(2 * Math.PI * 130 * t) + 0.5 * Math.sin(2 * Math.PI * 700 * t));
+  }
+  speakerCluster(tone);
+  check('之後才建立的 SpeakerBook 也吃得到那個上界（stop 之後不會消失）',
+    speakerBook?.maxSpeakers === 2, String(speakerBook?.maxSpeakers));
+
+  // 名單讀不到時（max=0）維持預設，不能變成 0 個講者
+  window.__onOffscreenMessage({ type: 'ma:offscreen:speakers', max: 0 }, {}, reply);
+  speakerBook = null;
+  speakerCluster(tone);
+  check('名單讀不到時維持預設上限，不會變成 0',
+    speakerBook?.maxSpeakers === 8, String(speakerBook?.maxSpeakers));
+  speakerMax = 0;
+  speakerBook = null;
 }
 
 // ── 聲紋分群的 id 要送到背景 ────────────────────────────────────
