@@ -449,14 +449,20 @@ const PLAIN_SUMMARY_FORMAT = [
 let summaryRunning = false;
 
 async function runSummary(force) {
-  if (summaryRunning) return;
+  // 手動按下「✦ 產生重點」時，側邊欄會**先**把按鈕切成「產生中…」再送訊息過來
+  // （不那樣做的話中間的空窗會讓人以為沒按到）。所以只要這裡提早返回，就必須
+  // 補一則 running:false，否則那顆按鈕會永遠停在「產生中…」而且是停用的 ——
+  // 使用者唯一的救法是關掉側邊欄重開，而畫面上完全看不出發生了什麼事。
+  const bail = () => { if (force) broadcast('summaryStatus', { running: false }); };
+
+  if (summaryRunning) return bail();
   const s = store.getState();
-  if (!s.segments.length) return;
+  if (!s.segments.length) return bail();
 
   const limits = await budget('summary');
 
   // Chrome 內建模型跑在側邊欄，關著就先不跑（而不是每次都噴錯誤）
-  if (limits.provider === 'chrome-ai' && !(await describe()).panelReachable) return;
+  if (limits.provider === 'chrome-ai' && !(await describe()).panelReachable) return bail();
 
   summaryRunning = true;
   broadcast('summaryStatus', { running: true });

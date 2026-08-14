@@ -7,7 +7,7 @@ let state = { segments: [], partials: [], summary: null, answers: [], status: {}
 let unseenInsights = 0;
 let unseenQa = 0;
 let activeTab = 'transcript';
-let summaryRunning = false;    // 顯示在狀態列（摘要按鈕已移除）
+let summaryRunning = false;    // 顯示在狀態列，也讓「✦ 產生重點」在進行中停用
 // 側邊欄需要知道 sttAuto（自動聽分頁聲音）與 captureScreen（提問預設附畫面）。
 // 在 loadSettings() 填入。
 let settings = null;
@@ -74,7 +74,9 @@ port.onMessage.addListener(({ type, payload }) => {
       renderInsights();
       break;
     case 'summaryStatus':
-      // 摘要按鈕已移除（摘要本來就會自動更新），進行中的狀態顯示在狀態列
+      // 進行中的狀態同時顯示在狀態列與「✦ 產生重點」按鈕上。
+      // 背景**保證**每一次 running:true 都會配一次 running:false（含提早返回的
+      // 情況，見 service-worker 的 runSummary），否則按鈕會永遠停在「產生中…」。
       summaryRunning = !!payload.running;
       renderStatus();
       break;
@@ -385,13 +387,23 @@ $('search').addEventListener('input', renderTranscript);
 /**
  * 「開始聽聲音」之後要告訴使用者什麼。
  *
- * 兩個引擎的延遲差很多，含糊帶過只會讓人以為壞了 —— 尤其是延遲：
+ * 三個引擎的延遲差很多，含糊帶過只會讓人以為壞了 —— 尤其是延遲：
  * 本機辨識要等一整段講完才出字，不說清楚會被當成沒在動。
+ *
+ * **每一個引擎都必須有自己的分支。** 這裡踩過一次：預設引擎換成 groq 之後
+ * 忘了加分支，於是走雲端的人（也就是所有正常設定好的人）看到的是最後那句
+ * 「瀏覽器內建備援引擎…執行 install-whisper.ps1 可換成原生引擎」——
+ * 描述的是一條他根本沒在走的路，而且叫他去裝一個他不需要的東西。
+ *
+ * 雲端那句還多負擔一件事：**音訊會離開這台電腦**。這是雲端相對本機唯一的
+ * 取捨，使用者有權在音訊送出去之前就知道，不能只寫在 README 裡。
  */
 function sttStartedMessage(res) {
   const note = res.note ? `${res.note} ` : '';
-  if (res.engine === 'deepgram') {
-    return `${note}已開始聽分頁聲音（雲端 Deepgram，按量計費）。說話者只能標成「講者 1／2」。`;
+  if (res.engine === 'groq') {
+    return `${note}已開始聽分頁聲音（Groq 雲端辨識，免費方案）。約 3–5 秒產出一段，`
+      + `說話者標成「其他人（雲端辨識）」。⚠️ 會議音訊會送到 Groq 的伺服器辨識 ——`
+      + `不希望的話，把設定頁的 Groq 金鑰清空就會改用完全離線的本機引擎。`;
   }
   if (res.engine === 'whisper-native') {
     return `${note}已開始聽分頁聲音（本機原生辨識，免費且完全離線）。每 12 秒產出一段，其他人的發言會延遲約 18 秒，說話者標成「其他人（本機辨識）」。`;
@@ -467,7 +479,9 @@ async function ensureLocalModel(onProgress) {
   if (localSession) return localSession;
   const avail = await localAvailability();
   if (avail === 'unsupported' || avail === 'unavailable') {
-    throw new Error('這個瀏覽器／裝置不支援 Chrome 內建模型。請改用 Claude API 或會後交給 Claude Code 摘要。');
+    // 不要在這裡建議「改用 Claude API」—— 那條路已經整個移除，而且是按量計費的。
+    // 這台機器跑不動內建模型時，正確的下一步是把雲端金鑰填好（免費且快得多）。
+    throw new Error('這個瀏覽器／裝置不支援 Chrome 內建模型。到設定頁貼上 Groq 的 API 金鑰就能用雲端免費方案，比內建模型更快也支援中文。');
   }
   // **必須指定 outputLanguage，而且中文不在支援清單裡。**
   // Chrome 目前只接受 [en, es, ja]（實測錯誤訊息列出 de/en/es/fr/ja），
@@ -596,7 +610,9 @@ async function refreshProviderBadge() {
     if (!res?.ok) {
       showBanner(unsupported
         ? `這台機器跑不動 Chrome 內建模型（Gemini Nano 需要 4GB 以上顯示記憶體、22GB 以上可用磁碟），已自動改用 Claude Code —— 吃你的 Pro 訂閱額度，不另外計費。還差最後一步：用 PowerShell 執行 bridge\\install.ps1 -ExtensionId ${chrome.runtime.id}`
-        : `Claude Code 橋接還沒註冊。請用 PowerShell 執行 bridge\\install.ps1 -ExtensionId ${chrome.runtime.id}。在那之前可以按「📸 存檔給 Claude Code」手動走 Pro 額度。`,
+        // 不要在這裡叫使用者去按「存檔給 Claude Code」—— 那顆按鈕已經移除了，
+        // 指向一顆不存在的按鈕比不給建議更糟。改成指向真正有效的下一步。
+        : `Claude Code 橋接還沒註冊。請用 PowerShell 執行 bridge\\install.ps1 -ExtensionId ${chrome.runtime.id}。或者到設定頁貼上 Groq 的 API 金鑰，走免費的雲端方案（快很多，也不需要橋接）。`,
         60000);
     }
   }

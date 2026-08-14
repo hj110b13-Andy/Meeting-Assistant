@@ -231,6 +231,47 @@
   check('沒有逐字稿時「產生重點」是停用的',
     document.querySelector('#btnSummary').disabled);
 
+  // ── 開始聆聽之後的說明：每個引擎都要有自己的分支 ────────────────
+  //
+  // 踩過一次：預設引擎從本機換成 groq 之後忘了加分支，於是**所有正常設定好
+  // 金鑰的人**（也就是走雲端的人）看到的是最後那句備援訊息 ——
+  // 「瀏覽器內建備援引擎…執行 install-whisper.ps1 可換成原生引擎」。
+  // 描述的是一條他根本沒在走的路，還叫他去裝一個不需要的東西。
+  //
+  // 這種錯誤不會有例外、不會有紅字、逐字稿照樣正常出現，所以只能靠測試守。
+  const startMessages = {};
+  for (const engine of ['groq', 'whisper-native', 'whisper']) {
+    window.__audioStartReply = { ok: true, engine };
+    // 先回到「沒在聽」：按鈕才會回來，sttStarting 也才會被 resetListening 清掉
+    emit('status', { platform: 'google-meet', audioFallback: false });
+    await tick();
+    document.querySelector('#btnListen').click();
+    for (let i = 0; i < 10; i++) await tick();
+    startMessages[engine] = txt('#banner');
+  }
+  window.__audioStartReply = null;
+
+  check('走雲端時說得出是雲端辨識，不是備援引擎',
+    startMessages.groq.includes('雲端') && !startMessages.groq.includes('備援'),
+    startMessages.groq);
+  // 音訊離開這台電腦是雲端相對本機唯一的取捨，使用者有權在送出去之前就知道，
+  // 不能只寫在 README 裡（offscreen.js 的 startGroq 註解也是這樣寫的）。
+  check('走雲端時明講音訊會送到 Groq 的伺服器',
+    startMessages.groq.includes('Groq 的伺服器'), startMessages.groq);
+  check('走雲端時不會叫使用者去裝本機 whisper（他不需要）',
+    !startMessages.groq.includes('install-whisper'), startMessages.groq);
+  check('三個引擎的說明各不相同（少一個分支就會有兩個一樣）',
+    new Set(Object.values(startMessages)).size === 3,
+    JSON.stringify(startMessages));
+  check('本機原生引擎的說明講的是本機',
+    startMessages['whisper-native'].includes('本機'), startMessages['whisper-native']);
+  check('WASM 備援的說明才提到 install-whisper.ps1',
+    startMessages.whisper.includes('install-whisper'), startMessages.whisper);
+  // 按量計費的路線已經整個移除，文案裡也不該再出現
+  check('沒有任何一個說明提到按量計費',
+    !Object.values(startMessages).some((m) => m.includes('按量計費')),
+    JSON.stringify(startMessages));
+
   // ── Chrome 內建模型：用不到就完全不要碰 ──────────────────────
   // 每一次 LanguageModel 呼叫，只要沒帶 outputLanguage，Chrome 就會在
   // 擴充功能的錯誤頁累積一筆「No output language was specified」。

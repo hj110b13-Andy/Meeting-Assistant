@@ -358,6 +358,31 @@ function noteDrop() {
   }
 }
 
+/**
+ * 辨識失敗的回報。**同一個錯誤只講一次。**
+ *
+ * 辨識錯誤幾乎都是持續性的：金鑰被拒、額度用完、網路斷掉 —— 一旦發生，
+ * 接下來每一段（雲端約 3–5 秒一段）都會用完全一樣的訊息再失敗一次。
+ * 沒有節流的話，一場一小時的會議會推出好幾百則一模一樣的橫幅，
+ * 把真正需要看到的訊息全部洗掉，看起來也像擴充功能自己壞了。
+ *
+ * 所以只在**訊息內容改變**時回報，並帶上累計次數 —— 使用者仍然看得出
+ * 「這件事一直在發生」，但不會被同一句話洗版。
+ */
+let sameError = { message: '', count: 0 };
+
+function noteTranscribeError(message) {
+  if (message === sameError.message) {
+    sameError.count += 1;
+    // 持續失敗仍然要偶爾提醒一次，否則使用者以為已經恢復了
+    if (sameError.count % 10 !== 0) return;
+    notifyError(`${message}（已連續失敗 ${sameError.count} 次）`);
+    return;
+  }
+  sameError = { message, count: 1 };
+  notifyError(message);
+}
+
 function enqueue(audio, startedAt) {
   // 雲端那條的瓶頸是「每分鐘幾次請求」，不是「算得多快」。
   // 丟掉等於白白丟掉使用者講的話，而合併不會 —— 兩段黏起來送一次，
@@ -407,8 +432,9 @@ async function pump() {
   try {
     const raw = await transcribe(job.audio);
     handleResult(raw, job.startedAt);
+    sameError = { message: '', count: 0 };   // 成功一次就把重複計數清掉
   } catch (err) {
-    notifyError(`${engineName === 'groq' ? '雲端' : '本機'}辨識錯誤：${String(err.message || err)}`);
+    noteTranscribeError(`${engineName === 'groq' ? '雲端' : '本機'}辨識錯誤：${String(err.message || err)}`);
   } finally {
     busy = false;
     // 這一段處理期間可能又切了新的段落
@@ -665,5 +691,7 @@ function stop() {
   silentMs = 0; quietMs = 0; silentWarned = false;
   carry = new Float32Array(0);
   lastResultText = '';
+  // 換引擎／重新開始時要清掉，否則新引擎的第一次失敗會被當成舊錯誤的延續而吞掉
+  sameError = { message: '', count: 0 };
   liveBySpeaker.clear();
 }

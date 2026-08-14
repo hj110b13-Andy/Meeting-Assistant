@@ -985,6 +985,27 @@ window.store = window.__module_store;
     !window.__fetches.some((f) => String(f.url || '').includes('api.anthropic.com')),
     JSON.stringify(window.__fetches.map((f) => f.url).filter((u) => u.includes('anthropic'))));
 
+  // ── 手動「產生重點」提早返回時也要收尾 ────────────────────────
+  //
+  // 側邊欄按下「✦ 產生重點」時會**先**把按鈕切成「產生中…」並停用，再送訊息
+  // 過來（不那樣做的話中間的空窗會讓人以為沒按到）。所以背景只要提早返回
+  // 而沒有補一則 running:false，那顆按鈕就永遠停在「產生中…」——
+  // 使用者唯一的救法是關掉側邊欄重開，而畫面上完全看不出發生了什麼事。
+  //
+  // 自動摘要不受影響（它沒有先把 UI 切過去），所以只有 force 那條要收尾。
+  await send({ type: 'ma:clear' });
+  await settle();
+  window.__broadcasts.length = 0;
+  await send({ type: 'ma:summarizeNow' });
+  await settle(); await settle();
+  const bail = got('summaryStatus');
+  check('沒有逐字稿時手動產生重點會回一則「結束了」，按鈕才不會卡在產生中',
+    bail.length >= 1 && bail.at(-1).payload.running === false,
+    JSON.stringify(bail.map((b) => b.payload)));
+  check('而且不會真的去打模型（沒有東西可以整理）',
+    !bail.some((b) => b.payload.running === true),
+    JSON.stringify(bail.map((b) => b.payload)));
+
   SETTINGS.provider = 'claude-code';
   SETTINGS.sttEngine = 'whisper-native';
 

@@ -183,6 +183,52 @@ $iMain  = [Array]::FindIndex([string[]]$scripts, [Predicate[string]] { $args[0] 
 Check 's2t-table.js 在 s2t.js 之前' ($iTable -ge 0 -and $iConv -gt $iTable) $order
 Check 's2t.js 在 offscreen.js 之前' ($iConv -ge 0 -and $iMain -gt $iConv) $order
 
+# ── 4.5 側邊欄文案沒有指向已經不存在的東西 ──────────────────────
+#
+# 側邊欄的說明文字是使用者遇到問題時唯一的指引，指向一顆已經移除的按鈕、
+# 或一條已經刪掉的付費路線，比不給建議更糟 —— 使用者會照著去找，找不到，
+# 然後以為是自己哪裡設錯了。
+#
+# 這類錯誤不會有例外、不會有紅字，功能也照常運作，所以只能靠掃描抓。
+Write-Host ''
+Write-Host '── 側邊欄文案 ──' -ForegroundColor Cyan
+$panelJs = [IO.File]::ReadAllText((Join-Path $root 'src\sidepanel\panel.js'), [Text.UTF8Encoding]::new($false))
+$panelHtml = [IO.File]::ReadAllText((Join-Path $root 'src\sidepanel\panel.html'), [Text.UTF8Encoding]::new($false))
+
+# 只看真正會顯示給使用者的字串（引號裡的），不看註解 —— 註解本來就會
+# 為了解釋「為什麼拿掉」而提到這些名字。
+$panelStrings = ([regex]::Matches($panelJs, "'([^'\r\n]*)'") | ForEach-Object { $_.Groups[1].Value }) -join "`n"
+$panelStrings += "`n" + (([regex]::Matches($panelJs, '`([^`]*)`') | ForEach-Object { $_.Groups[1].Value }) -join "`n")
+
+foreach ($gone in @('存檔給 Claude Code', 'Deepgram', '按量計費')) {
+  Check "文案沒有提到已移除的「$gone」" ($panelStrings -notmatch [regex]::Escape($gone)) `
+    '這條路已經刪掉了，訊息會把使用者帶到死路'
+}
+
+# panel.js 拿得到的每個元素都要真的在 panel.html 裡。$('x') 回傳 null 時
+# 後面接的 .textContent／.addEventListener 會直接丟例外，而那是在模組頂層 ——
+# **整支 panel.js 停掉**，側邊欄變成一片空白，看起來像檔案沒載入。
+# 移除按鈕時最容易漏掉這種殘留。
+$panelIds = [regex]::Matches($panelJs, "\`$\('([A-Za-z0-9_]+)'\)") |
+  ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
+foreach ($id in $panelIds) {
+  Check "panel.js 用到的 #$id 在 panel.html 裡存在" ($panelHtml -match "id=""$id""") `
+    'panel.js 會在這裡丟 null 例外，而且是整支腳本停掉'
+}
+
+# 每個 startAudioFallback 回得出來的引擎都要有自己的說明分支。
+# 少一個的話使用者會收到「描述另一條路」的訊息 —— 踩過一次：預設換成
+# groq 之後忘了加分支，所有正常設定好金鑰的人都被叫去裝本機 whisper。
+$swJs = [IO.File]::ReadAllText((Join-Path $root 'src\background\service-worker.js'), [Text.UTF8Encoding]::new($false))
+$msgFn = [regex]::Match($panelJs, 'function sttStartedMessage[\s\S]*?\n\}')
+Check 'panel.js 有 sttStartedMessage' $msgFn.Success '找不到引擎說明的函式'
+foreach ($engine in @('groq', 'whisper-native')) {
+  Check "引擎「$engine」有自己的說明分支" ($msgFn.Value -match [regex]::Escape("'$engine'")) `
+    '會掉到最後那句備援訊息，描述的是使用者根本沒在走的路'
+}
+Check 'service-worker 的預設引擎是 groq' ($swJs -match "settings\.sttEngine \|\| 'groq'") `
+  '預設引擎改了的話，上面那些分支也要跟著檢查'
+
 # ── 5. 測試執行器引用的來源檔都存在 ─────────────────────────────
 Write-Host ''
 Write-Host '── 測試執行器 ──' -ForegroundColor Cyan

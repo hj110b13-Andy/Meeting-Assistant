@@ -57,6 +57,10 @@ window.chrome = {
       }
       // 側邊欄要先問背景哪個分頁是會議分頁，才能對它擷取音訊
       if (msg.type === 'ma:meetingTab') return { tabId: window.__meetingTabId ?? 77 };
+      // 開始聆聽的回覆帶著「最後真的用了哪個引擎」。可以換掉（見 __audioStartReply），
+      // 用來驗證每個引擎都有自己的說明 —— 少一個分支的話使用者會收到
+      // 描述另一條路的訊息，而那種錯誤自己不會浮出來。
+      if (msg.type === 'ma:audio:start') return window.__audioStartReply ?? { ok: true };
       return { ok: true };
     },
     openOptionsPage: () => {},

@@ -271,7 +271,54 @@ check('雲端辨識的段落標成雲端來源',
   sent.find((m) => m.type === 'ma:segment')?.payload.speaker === '其他人（雲端辨識）',
   sent.find((m) => m.type === 'ma:segment')?.payload.speaker);
 
+// ── 持續失敗時不要洗版 ──────────────────────────────────────────
+// 辨識錯誤幾乎都是持續性的（金鑰被拒、額度用完、網路斷掉），一旦發生，
+// 接下來每一段都會用一模一樣的訊息再失敗一次。雲端約 3–5 秒一段，
+// 一小時就是好幾百則相同的橫幅 —— 真正該看到的訊息會被整個洗掉，
+// 而且畫面看起來像擴充功能自己壞了。
+sent.length = 0;
+pending = [];
+sameError = { message: '', count: 0 };
+transcribe = async () => { throw new Error('Groq 金鑰被拒（401）'); };
+lastCloudSentAt = 0;
+for (let i = 0; i < 6; i++) {
+  pending.push({ audio: new Float32Array(16000), startedAt: 9000 + i });
+  lastCloudSentAt = 0;          // 每一輪都讓節流窗過去，才會真的送出去
+  await pump();
+  await Promise.resolve(); await Promise.resolve();
+}
+const errs = sent.filter((m) => m.type === 'ma:audioError');
+check('同一個錯誤連續發生時只回報一次，不洗版',
+  errs.length === 1, `${errs.length} 則：${JSON.stringify(errs.map((e) => e.message))}`);
+check('而且訊息說得出是金鑰問題',
+  errs[0]?.message.includes('金鑰'), errs[0]?.message);
+
+// 換了一個不同的錯誤仍然要講 —— 節流的是「重複」，不是「錯誤」
+sent.length = 0;
+transcribe = async () => { throw new Error('雲端辨識逾時（45 秒）'); };
+pending.push({ audio: new Float32Array(16000), startedAt: 9100 });
+lastCloudSentAt = 0;
+await pump();
+await Promise.resolve(); await Promise.resolve();
+check('換成另一個錯誤時會重新回報（節流的是重複，不是錯誤本身）',
+  sent.filter((m) => m.type === 'ma:audioError').length === 1,
+  JSON.stringify(sent.filter((m) => m.type === 'ma:audioError').map((e) => e.message)));
+
+// 成功一次就把計數清掉，恢復之後再壞才會立刻再講一次
+sent.length = 0;
+lastResultText = '';
+toTraditionalOn = false;
+transcribe = async () => '恢復了';
+pending.push({ audio: new Float32Array(16000), startedAt: 9200 });
+lastCloudSentAt = 0;
+await pump();
+await Promise.resolve(); await Promise.resolve();
+check('成功一次之後把重複計數清掉',
+  sameError.count === 0, JSON.stringify(sameError));
+
 engineName = 'whisper-native';   // 收乾淨，免得影響之後新增的測試
+transcribe = null;
+sameError = { message: '', count: 0 };
 
 // ── 收尾 ────────────────────────────────────────────────────────
 const failed = results.filter((r) => r.startsWith('FAIL')).length;
