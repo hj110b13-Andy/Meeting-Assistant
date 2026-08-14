@@ -24,14 +24,40 @@ async function load() {
  * **不把金鑰本身填回輸入框**，只顯示遮罩過的摘要 —— 這個頁面會出現在
  * 截圖與螢幕分享裡。輸入框留空代表「不修改」，填了才會覆蓋，
  * 所以使用者可以只改其中一把而不必重貼全部。
+ *
+ * 代價是「存完之後框是空的」，看起來很像沒存成功。所以狀態要放在
+ * **每個欄位自己身上**（placeholder 與旁邊那行字），而不是只寫在
+ * 頁面下方的總結 —— 使用者盯著欄位看的時候，根本看不到下面那行。
  */
+const PLACEHOLDERS = { groq: 'gsk_…', nvidia: 'nvapi-…', nvidia2: 'nvapi-…', tavily: 'tvly-…' };
+
 async function loadKeys() {
   const r = await chrome.runtime.sendMessage({ type: 'ma:keys:get' });
   if (!r) return;
   const names = { groq: 'Groq', nvidia: 'NVIDIA 1', nvidia2: 'NVIDIA 2', tavily: 'Tavily' };
+
+  const stateIds = { groq: 'groqState', nvidia: 'nimState', nvidia2: 'nim2State', tavily: 'tavilyState' };
+  for (const f of KEY_FIELDS) {
+    const input = $(f);
+    const el = $(stateIds[f]);
+    if (r.present?.[f]) {
+      input.placeholder = `已儲存 ${r.masked[f]}　—　留空不動它，要換才重貼`;
+      // 「測試中…」之類的暫時訊息不要被蓋掉
+      if (el && !el.textContent.includes('測試中')) {
+        el.className = 'keystate ok';
+        el.textContent = `已儲存 ${r.masked[f]}`;
+      }
+    } else {
+      input.placeholder = PLACEHOLDERS[f];
+      if (el && !el.textContent) el.textContent = '（未設定）';
+    }
+  }
+
   const parts = KEY_FIELDS.map((f) => `${names[f]}：${r.masked?.[f] || '（未設定）'}`);
   $('keysCurrent').innerHTML = `目前已存：${parts.join('　')}<br>`
-    + '輸入框留空表示「不修改」，要換掉某一把才需要重新貼上。';
+    + '<strong>存好之後輸入框會清空，這是正常的</strong> —— 金鑰不留在畫面上，'
+    + '因為這一頁很可能出現在螢幕分享或截圖裡。上面每個欄位會顯示它存了哪一把，'
+    + '留空就是「不動它」。';
 
   // 貼錯欄位是最常見又最難查的錯：症狀是 401，而 401 看起來像「金鑰過期」，
   // 於是使用者會跑去重新簽發一把新的，然後再貼錯一次。
@@ -41,22 +67,19 @@ async function loadKeys() {
   }
 }
 
-$('saveKeys').addEventListener('click', async () => {
-  const patch = {};
-  for (const f of KEY_FIELDS) {
-    const v = $(f).value.trim();
-    if (v) patch[f] = v;          // 留空 = 不動既有的那把
-  }
-  if (!Object.keys(patch).length) {
-    $('keysSaved').textContent = '沒有填任何金鑰（留空表示不修改）';
-    return;
-  }
-  const r = await chrome.runtime.sendMessage({ type: 'ma:keys:set', patch });
-  for (const f of KEY_FIELDS) $(f).value = '';   // 存完就清掉，不留在畫面上
-  $('keysSaved').textContent = r?.ok ? '已儲存 ✓' : '儲存失敗';
-  setTimeout(() => ($('keysSaved').textContent = ''), 2500);
-  await loadKeys();
-});
+/**
+ * 有沒有還沒存的變更。
+ *
+ * 這一頁比一個螢幕長，很容易填完就直接關掉。沒有這個提示的話，
+ * 「我明明填了」與「它沒存」之間完全沒有線索。
+ */
+function markDirty() {
+  $('dirty').textContent = '● 有變更還沒儲存';
+}
+
+for (const f of [...FIELDS, ...KEY_FIELDS, 'summaryEverySegments', 'summaryEverySeconds']) {
+  $(f)?.addEventListener('input', markDirty);
+}
 
 /**
  * 測試按鈕。
@@ -79,14 +102,14 @@ function wireTest(buttonId, stateId, vendor, inputId) {
     if (r?.ok) {
       el.className = 'keystate ok';
       el.textContent = `可以用 ✓（${r.ms} 毫秒${r.model ? `，${r.model}` : ''}）`
-        + (typed ? '　記得按下面的「儲存金鑰」' : '');
+        + (typed ? '　還沒存 —— 記得按頁面最下面的「儲存設定」' : '');
       return;
     }
 
     el.className = 'keystate bad';
     // 兩邊都沒有金鑰時，講清楚該做什麼，而不是只說「沒有填金鑰」
     el.textContent = r?.noKey
-      ? '還沒有金鑰：請在上面的欄位貼上，或先按「儲存金鑰」'
+      ? '還沒有金鑰：請在上面的欄位貼上'
       : `不能用：${r?.error || '未知錯誤'}`;
   });
 }
@@ -96,16 +119,63 @@ wireTest('testNim', 'nimState', 'nim', 'nvidia');
 wireTest('testNim2', 'nim2State', 'nim2', 'nvidia2');
 wireTest('testTavily', 'tavilyState', 'tavily', 'tavily');
 
+/**
+ * 儲存**這一頁的全部內容**：金鑰、名字、背景筆記、摘要頻率。
+ *
+ * 原本金鑰與其他設定各有一顆儲存按鈕。金鑰那塊在頁面最上方，所以「儲存金鑰」
+ * 是使用者最先遇到的按鈕 —— 填完名字與摘要間隔之後按到它，那兩項就不會被存，
+ * 而畫面上還是會出現一個綠色的「已儲存 ✓」。使用者只會看到「我明明填了、
+ * 它也說存好了，但下次打開是空的」，沒有任何線索指向真正的原因。
+ *
+ * 一頁兩顆儲存鍵本身就是那個錯誤的來源，所以合併成一顆，
+ * 而且確認訊息會**逐項列出到底存了什麼**。
+ */
 $('save').addEventListener('click', async () => {
+  const saved = [];
+
+  // ── 一般設定 ──────────────────────────────────────────────
   const patch = {};
   for (const f of FIELDS) patch[f] = $(f).value.trim();
-  // 夾在合理範圍內：段數太小會為兩句話跑一次，秒數太小會很快吃掉 Pro 額度。
+  // 夾在合理範圍內：段數太小會為兩句話跑一次，秒數太小會很快吃掉當天的額度。
   // 空白或亂填時回到預設值，而不是存進一個會讓摘要再也不觸發的數字。
   patch.summaryEverySegments = Math.min(50, Math.max(2, Number($('summaryEverySegments').value) || 8));
   patch.summaryEveryMs = Math.min(1800, Math.max(15, Number($('summaryEverySeconds').value) || 300)) * 1000;
-  await chrome.runtime.sendMessage({ type: 'ma:settings:set', patch });
-  $('saved').textContent = '已儲存 ✓';
-  setTimeout(() => ($('saved').textContent = ''), 2500);
+
+  const next = await chrome.runtime.sendMessage({ type: 'ma:settings:set', patch });
+  if (!next) {
+    // sendMessage 沒人接時回 undefined。當成成功就會變成一種安靜的失敗 ——
+    // 畫面說存好了，實際上什麼都沒發生。最常見的原因是擴充功能剛被重新載入，
+    // 而這一頁還是舊的那份。
+    $('saved').textContent = '儲存失敗：背景沒有回應。請關掉這一頁重新打開再試一次。';
+    return;
+  }
+  saved.push(`名字「${patch.myNames || '（空白）'}」`);
+  saved.push(`摘要 ${patch.summaryEverySegments} 段 / ${patch.summaryEveryMs / 1000} 秒`);
+
+  // ── 金鑰（留空 = 不動既有的那把）──────────────────────────
+  const keyPatch = {};
+  for (const f of KEY_FIELDS) {
+    const v = $(f).value.trim();
+    if (v) keyPatch[f] = v;
+  }
+  if (Object.keys(keyPatch).length) {
+    const r = await chrome.runtime.sendMessage({ type: 'ma:keys:set', patch: keyPatch });
+    if (r?.ok) {
+      // 存完就清掉，不留在畫面上（這一頁很可能出現在螢幕分享裡）。
+      // 清空看起來很像「沒存成功」，所以 loadKeys() 會把
+      // 「已儲存 gsk_abcd…6789」寫進每個欄位的 placeholder。
+      for (const f of KEY_FIELDS) $(f).value = '';
+      saved.push(`${Object.keys(keyPatch).length} 把金鑰`);
+    } else {
+      $('saved').textContent = '設定已儲存，但金鑰儲存失敗';
+      return;
+    }
+  }
+
+  $('dirty').textContent = '';
+  $('saved').textContent = `已儲存 ✓　${saved.join('、')}`;
+  setTimeout(() => ($('saved').textContent = ''), 8000);
+  await loadKeys();
 });
 
 /**

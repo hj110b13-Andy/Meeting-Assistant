@@ -38,8 +38,11 @@ Copy-Item (Join-Path $root 'src\offscreen\offscreen.js') $tmp -Force
 Copy-Item (Join-Path $root 'src\lib\s2t.js')           $tmp -Force
 Copy-Item (Join-Path $root 'src\lib\s2t-table.js')     $tmp -Force
 Copy-Item (Join-Path $root 'src\sidepanel\panel.css') $tmp -Force
-Copy-Item (Join-Path $PSScriptRoot 'panel.stub.js')   $tmp -Force
-Copy-Item (Join-Path $PSScriptRoot 'panel.drive.js')  $tmp -Force
+Copy-Item (Join-Path $PSScriptRoot 'panel.stub.js')     $tmp -Force
+Copy-Item (Join-Path $PSScriptRoot 'panel.drive.js')    $tmp -Force
+Copy-Item (Join-Path $root 'src\options\options.js')    $tmp -Force
+Copy-Item (Join-Path $PSScriptRoot 'options.stub.js')   $tmp -Force
+Copy-Item (Join-Path $PSScriptRoot 'options.drive.js')  $tmp -Force
 Get-ChildItem $PSScriptRoot -Filter '*.test.html' | Copy-Item -Destination $tmp -Force
 
 # 背景腳本是 ES module：只拿掉 import/export 關鍵字讓函式變成全域，其餘程式碼不動
@@ -88,11 +91,23 @@ $panel = $panel.Replace(
   "<script src=`"panel.stub.js`"></script>`n<script src=`"panel.js`"></script>`n<script src=`"panel.drive.js`"></script>")
 [IO.File]::WriteAllText((Join-Path $tmp 'panel.test.html'), $panel, [Text.UTF8Encoding]::new($false))
 
+# 設定頁同理：用真正的 options.html，只在 options.js 前後插入 stub 與驅動腳本。
+# stub 會把 sendMessage 接到**真正的** settings.js / keys.js —— 會出問題的正是
+# 「設定頁寫進去、下次讀回來」這條來回，只驗設定頁單邊等於什麼都沒驗。
+$opts = [IO.File]::ReadAllText((Join-Path $root 'src\options\options.html'))
+$opts = $opts.Replace(
+  '<script src="options.js"></script>',
+  "<script src=`"settings.test.js`"></script>`n<script src=`"keys.test.js`"></script>`n" +
+  "<script src=`"options.stub.js`"></script>`n<script src=`"options.js`"></script>`n" +
+  "<script src=`"options.drive.js`"></script>")
+[IO.File]::WriteAllText((Join-Path $tmp 'options.test.html'), $opts, [Text.UTF8Encoding]::new($false))
+
 # ── 逐頁執行 ────────────────────────────────────────────────────
 $pages = @(
   @{ File = 'engine.test.html';     Name = '字幕擷取引擎（Meet / Teams）'; Pre = 'out' },
   @{ File = 'store.test.html';      Name = '逐字稿狀態與匯出';             Pre = 'out' },
   @{ File = 'panel.test.html';      Name = '側邊欄 UI';                    Pre = 'testout' },
+  @{ File = 'options.test.html';    Name = '設定頁（存檔與重讀）';         Pre = 'testout' },
   @{ File = 'background.test.html'; Name = '背景邏輯與 Claude 用戶端';     Pre = 'out' },
   @{ File = 'offscreen.test.html';  Name = '音訊處理（重疊去重／靜音／WAV／原生引擎）'; Pre = 'out' },
   @{ File = 's2t.test.html';        Name = '簡繁轉換（本機辨識輸出用）'; Pre = 'out' }

@@ -30,7 +30,15 @@
     button { font: inherit; padding: 8px 18px; border-radius: 7px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
     button.sec { background: transparent; color: var(--accent); }
     .bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-    #saved, #sttState, #jitsiState, #keysSaved { color: var(--accent); font-size: 13px; }
+    #saved, #sttState, #jitsiState { color: var(--accent); font-size: 13px; }
+    /* 儲存列黏在畫面下緣：這一頁比一個螢幕長，捲到中間時看不到儲存鍵，
+       填完就直接關掉是最容易發生的事。 */
+    .savebar {
+      position: sticky; bottom: 0; z-index: 5;
+      padding: 12px 0; margin-top: 4px;
+      background: var(--bg); border-top: 1px solid var(--line);
+    }
+    #dirty { font-size: 13px; color: #d97706; font-weight: 600; }
     input[type="password"] {
       width: 100%; font: 13px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace;
       padding: 7px 9px; border: 1px solid var(--line);
@@ -105,10 +113,6 @@
       一般的會議問題靠逐字稿回答，不會浪費查詢額度。
     </p>
 
-    <div class="bar" style="margin-top:16px">
-      <button id="saveKeys" type="button">儲存金鑰</button>
-      <span id="keysSaved"></span>
-    </div>
     <p class="hint" id="keysCurrent"></p>
   </fieldset>
 
@@ -151,9 +155,18 @@
     </p>
   </fieldset>
 
-  <div class="bar">
+  <!--
+    只有一顆儲存按鈕，而且它存這一頁的**全部**內容（金鑰、名字、筆記、摘要頻率）。
+
+    原本金鑰與其他設定各有一顆儲存按鈕。金鑰那塊在頁面最上方，所以「儲存金鑰」
+    是使用者最先遇到的按鈕 —— 填完名字與摘要間隔之後按到它，那兩項就不會被存，
+    而畫面上還是會出現一個綠色的「已儲存 ✓」。沒有任何線索指向真正的原因。
+    一頁兩顆儲存鍵本身就是那個錯誤的來源，所以合併掉。
+  -->
+  <div class="bar savebar">
     <button id="save">儲存設定</button>
     <span id="saved"></span>
+    <span id="dirty"></span>
   </div>
 
   <details>
