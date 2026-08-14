@@ -81,6 +81,62 @@ Write-Host ("金鑰：Groq {0}　NVIDIA {1}／{2}　Tavily {3}" -f
   $(if ($keys.groq) { 'v' } else { '-' }), $(if ($keys.nvidia) { 'v' } else { '-' }),
   $(if ($keys.nvidia2) { 'v' } else { '-' }), $(if ($keys.tavily) { 'v' } else { '-' })) -ForegroundColor DarkGray
 
+# ── 串流（真實時間）─────────────────────────────────────────────
+# 串流**不能**在 headless Chrome 裡測：--virtual-time-budget 會快轉時鐘，
+# 留著逾時計時器就會在回應回來前把串流 abort 掉（實測只收到第一個 token），
+# 拿掉計時器則整頁卡死。兩種都不是產品的問題，卻都會產生紅字。
+#
+# 用 curl 在真實時間下驗，反而比原本更準：看得到 Groq 真的是一塊一塊吐的。
+# 至於 SSE 解析器本身（半行 JSON、事件切在 chunk 邊界），由 run.ps1 的
+# background 測試用合成串流涵蓋，不需要網路也不受時鐘影響。
+$psPass = 0; $psFail = 0
+function PsCheck($name, $cond, $detail = '') {
+  if ($cond) { $script:psPass++; Write-Host "  PASS  $name" -ForegroundColor DarkGreen }
+  else       { $script:psFail++; Write-Host "  FAIL  $name  ->  $detail" -ForegroundColor Red }
+}
+
+Write-Host ''
+Write-Host '── 串流（curl，真實時間）──' -ForegroundColor Cyan
+$curl = "$env:SystemRoot\System32\curl.exe"
+$bodyFile = Join-Path $tmp 'stream-body.json'
+New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+$streamBody = @{
+  model = 'llama-3.3-70b-versatile'
+  messages = @(@{ role = 'user'; content = '用繁體中文寫三句話說明如何降低退款延遲。' })
+  max_tokens = 200
+  temperature = 0.3
+  stream = $true
+} | ConvertTo-Json -Depth 5 -Compress
+[IO.File]::WriteAllText($bodyFile, $streamBody, [Text.UTF8Encoding]::new($false))
+
+# -N 關掉緩衝，才看得出「一塊一塊回來」而不是一次收完
+$raw = & $curl -s -N -m 60 'https://api.groq.com/openai/v1/chat/completions' `
+  -H "Authorization: Bearer $($keys.groq)" -H 'Content-Type: application/json' `
+  -H 'Accept: text/event-stream' --data-binary "@$bodyFile" 2>$null
+
+$dataLines = @($raw -split "`n" | Where-Object { $_ -match '^data:\s*\{' })
+# 不要把 foreach 敘述直接接到管線 —— PowerShell 5.1 會報
+# 「An empty pipe element is not allowed」。用一般的迴圈累積就好。
+$deltas = @()
+foreach ($line in $dataLines) {
+  try {
+    $c = (($line -replace '^data:\s*', '') | ConvertFrom-Json).choices[0].delta.content
+    if ($c) { $deltas += $c }
+  } catch { }
+}
+$joined = -join $deltas
+
+PsCheck 'Groq 的串流端點回得了 SSE' ($dataLines.Count -gt 0) "收到 $($dataLines.Count) 行 data:"
+PsCheck '真的是一塊一塊吐（不是一次回完）' ($deltas.Count -gt 3) "$($deltas.Count) 塊"
+PsCheck '串流內容是繁體中文' ($joined -match '[繁體會議對帳這個們設進來還發應退款]' -and $joined -notmatch '[这个们对帐会议应发]') $joined.Substring(0, [Math]::Min(60, $joined.Length))
+PsCheck '串流有正常收尾（收到 [DONE]）' ($raw -match '\[DONE\]') '沒有看到 [DONE]'
+if ($joined) {
+  Write-Host ("      [串流 llama-3.3-70b-versatile：{0} 塊] {1}…" -f $deltas.Count,
+    ($joined -replace '\s+', ' ').Substring(0, [Math]::Min(70, ($joined -replace '\s+', ' ').Length))) -ForegroundColor DarkGray
+}
+Remove-Item $bodyFile -Force -ErrorAction SilentlyContinue
+Write-Host ''
+
 # ── 準備待測檔案（跟 run.ps1 同樣的模組轉換）────────────────────
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 function Convert-Module($src, $dest) {
@@ -196,31 +252,18 @@ check('摘要用的是跟回答不同的模型（額度分桶）', sum.model !==
 check('摘要是繁體中文', isTraditional(sum.text), sum.text.slice(0, 60));
 results.push('      [摘要 ' + sum.vendor + '/' + sum.model + '] ' + sum.text.replace(/\s+/g, ' ').slice(0, 90));
 
-// ══ 3. 串流：真的 SSE，不是一次吐完 ═══════════════════════════
-step('打 Groq 的串流（SSE）');
-const chunks = [];
-const streamed = await cloudStream({
-  role: 'answer', maxTokens: 200,
-  prompt: '用繁體中文寫三句話說明如何降低退款延遲。',
-  onDelta: (d) => chunks.push(d),
-});
-check('串流拿得到內容', !!streamed.text, JSON.stringify(streamed).slice(0, 200));
-// 被中途砍斷時 cloudStream 會回 stopReason:'truncated' 並附上原因。
-// 分開驗，才不會把「串流壞了」跟「內容不是繁體」混成同一個紅字。
-check('串流沒有被中途砍斷',
-  streamed.stopReason === 'end_turn',
-  streamed.stopReason + '　' + (streamed.error || ''));
-check('串流是繁體中文', isTraditional(streamed.text), streamed.text.slice(0, 60));
-// onDelta 有被呼叫，代表 SSE 解析器認得 Groq 真正吐出來的事件格式。
-// **不驗「分成幾塊」** —— headless 的虛擬時間會把整個回應緩衝完才交給 reader，
-// 所以這裡永遠是 1 塊，跟串流有沒有壞無關（見檔頭關於計時的說明）。
-check('onDelta 真的被呼叫（SSE 解析器認得 Groq 的事件格式）',
-  chunks.length > 0, chunks.length + ' 塊');
-check('串流組回來的文字跟回傳值一致',
-  chunks.join('').replace(/\s/g, '').includes(streamed.text.replace(/\s/g, '').slice(0, 20)),
-  streamed.text.slice(0, 40));
-results.push('      [串流 ' + streamed.model + '：' + chunks.length + ' 塊、'
-  + streamed.text.replace(/\s+/g, ' ').slice(0, 50) + '…]');
+// ══ 3. 串流不在這裡測 ═════════════════════════════════════════
+// 串流跟 headless 的虛擬時鐘根本不相容：
+//   * 留著逾時計時器 → 虛擬時鐘快轉，abort 在回應回來前就把串流砍掉
+//     （實測只收到第一個 token「為」）
+//   * 拿掉逾時計時器 → 串流永遠不結束，整頁卡死在這一步
+// 兩邊都不是產品的問題，但兩邊都會產生紅字，而紅字應該只留給真的壞掉的東西。
+//
+// 所以拆成兩半，各用適合的工具驗：
+//   * **即時的 SSE 契約**（Groq 真的一塊一塊吐嗎）→ 這支腳本的 PowerShell 段
+//     用 curl 在真實時間下驗，見上面的「串流（真實時間）」區塊。
+//   * **SSE 解析器**（半行 JSON、事件切在 chunk 邊界）→ run.ps1 的
+//     background 測試，用合成的串流餵它，不需要網路也不受時鐘影響。
 
 // ══ 4. 語音辨識：真的音訊、真的 API ═══════════════════════════
 // speech.js 是 16.6 秒的真實中文會議錄音（22050 Hz）
@@ -326,11 +369,14 @@ if (-not $m.Success) {
   exit 1
 }
 
+Write-Host '── 其餘（headless Chrome，跑真正的原始碼）──' -ForegroundColor Cyan
+
 $text = [System.Net.WebUtility]::HtmlDecode($m.Groups[1].Value)
 $finished = $text -match '__DONE__'
 $text = $text -replace '__DONE__', ''
 
-$pass = 0; $fail = 0
+# 從 curl 那一段帶過來，否則串流的失敗會在總計裡消失
+$pass = $psPass; $fail = $psFail
 foreach ($line in ($text -split "`n")) {
   if     ($line -match '^PASS') { $pass++; Write-Host "  $line" -ForegroundColor DarkGreen }
   elseif ($line -match '^FAIL') { $fail++; Write-Host "  $line" -ForegroundColor Red }
