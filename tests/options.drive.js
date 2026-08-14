@@ -155,6 +155,22 @@ try {
   check('把 Groq 金鑰貼到 NVIDIA 欄位會被指出來',
     $$('keysCurrent').innerHTML.includes('貼錯欄位'), $$('keysCurrent').textContent.slice(-80));
 
+  // ── 「目前實際存了什麼」的診斷 ────────────────────────────────
+  // 它存在的理由是「畫面說已儲存但其實沒存」這種很難查的失敗，
+  // 所以它自己一定要讀儲存層、而且不能洩漏金鑰。
+  $$('myNames').value = '診斷用名字';
+  $$('save').click();
+  await settle(); await settle();
+  $$('dumpState').click();
+  await settle(); await settle();
+
+  const dump = $$('dumpOut').textContent;
+  check('診斷顯示存下來的名字', dump.includes('診斷用名字'), dump.slice(0, 120));
+  check('診斷顯示摘要頻率', /至少 \d+ 段/.test(dump), dump.slice(0, 200));
+  check('診斷顯示金鑰是遮罩過的', dump.includes('gsk_FAKE') && !dump.includes('optionspagetestkey'), dump);
+  check('診斷講得出現在會走哪條路', dump.includes('逐字稿：'), dump);
+  check('有 Groq 金鑰時說走雲端辨識', dump.includes('Groq 雲端辨識'), dump);
+
 } catch (err) {
   results.push(`FAIL  測試中斷  →  ${err.stack || err}`);
 }

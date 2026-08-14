@@ -179,6 +179,57 @@ $('save').addEventListener('click', async () => {
 });
 
 /**
+ * 「目前實際存了什麼」。
+ *
+ * 存在的理由是一個很難查的失敗：畫面說「已儲存 ✓」但其實沒存進去。
+ * 使用者唯一能做的判斷是「下次打開有沒有回來」，而那時已經隔了很久，
+ * 也分不出是「沒存進去」還是「沒讀回來」。這顆按鈕直接把儲存層的內容
+ * 攤開來，讓那個判斷變成當場一秒的事。
+ *
+ * **金鑰一律用遮罩過的版本**（背景回傳的就是遮罩後的），
+ * 使用者才能安心把這一段截圖給別人看。
+ */
+$('dumpState').addEventListener('click', async () => {
+  const el = $('dumpOut');
+  el.textContent = '讀取中…';
+  const [s, k] = await Promise.all([
+    chrome.runtime.sendMessage({ type: 'ma:settings:get' }),
+    chrome.runtime.sendMessage({ type: 'ma:keys:get' }),
+  ]);
+  if (!s || !k) {
+    el.textContent = '背景沒有回應。最常見的原因是擴充功能剛重新載入，'
+      + '而這一頁還是舊的那份 —— 關掉這一頁重新打開即可。';
+    return;
+  }
+
+  const yesNo = (v) => (v ? '有' : '（空白）');
+  const lines = [
+    '── 設定 ──',
+    `我的名字／稱呼：${s.myNames || '（空白 —— 自動回答幾乎不會觸發）'}`,
+    `背景筆記：${yesNo(s.notes)}${s.notes ? `（${s.notes.length} 字）` : ''}`,
+    `摘要頻率：至少 ${s.summaryEverySegments} 段，且距上次至少 ${Math.round(s.summaryEveryMs / 1000)} 秒`,
+    `自架 Jitsi 網域：${s.jitsiDomains || '（未設定）'}`,
+    '',
+    '── 金鑰（遮罩後，可安心截圖）──',
+    `GroqCloud：${k.masked?.groq || '（未設定）'}`,
+    `NVIDIA NIM 1：${k.masked?.nvidia || '（未設定）'}`,
+    `NVIDIA NIM 2：${k.masked?.nvidia2 || '（未設定）'}`,
+    `Tavily：${k.masked?.tavily || '（未設定）'}`,
+    '',
+    '── 目前會走哪條路 ──',
+    `逐字稿：${k.present?.groq ? 'Groq 雲端辨識（快 8 倍）' : '本機 whisper.cpp（沒有 Groq 金鑰）'}`,
+    `摘要與回答：${k.present?.groq || k.present?.nvidia || k.present?.nvidia2
+      ? '雲端免費方案（約 1 秒）' : 'Claude Code 橋接（10–30 秒）'}`,
+    `網路查證：${k.present?.tavily ? '開啟（只在需要外部資料時）' : '關閉（沒有 Tavily 金鑰）'}`,
+  ];
+  if (k.mismatched?.length) {
+    lines.push('', '⚠ 看起來貼錯欄位：'
+      + k.mismatched.map((m) => `「${m.label}」應該以 ${m.prefix} 開頭`).join('；'));
+  }
+  el.textContent = lines.join('\n');
+});
+
+/**
  * 自架 Jitsi：向使用者要網域授權，再請背景註冊內容腳本。
  * chrome.permissions.request 必須從使用者手勢裡呼叫，所以只能放在這個頁面。
  */

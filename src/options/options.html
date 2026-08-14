@@ -39,6 +39,12 @@
       background: var(--bg); border-top: 1px solid var(--line);
     }
     #dirty { font-size: 13px; color: #d97706; font-weight: 600; }
+    .dump {
+      font: 12px/1.6 ui-monospace, "Cascadia Mono", Consolas, monospace;
+      background: rgba(127,127,127,.10); border: 1px solid var(--line); border-radius: 6px;
+      padding: 10px 12px; margin: 10px 0 0; white-space: pre-wrap; word-break: break-all;
+    }
+    .dump:empty { display: none; }
     input[type="password"] {
       width: 100%; font: 13px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace;
       padding: 7px 9px; border: 1px solid var(--line);
@@ -171,6 +177,19 @@
 
   <details>
     <summary>進階（通常不必動）</summary>
+
+    <fieldset>
+      <legend>目前實際存了什麼</legend>
+      <div class="bar">
+        <button id="dumpState" class="sec" type="button">顯示儲存的內容</button>
+      </div>
+      <pre id="dumpOut" class="dump"></pre>
+      <p class="hint">
+        用來確認「我按了儲存，它到底存進去沒有」。讀的是這台瀏覽器實際存下來的值，
+        不是畫面上顯示的東西 —— 兩者對不起來就代表儲存那一步有問題。
+        <strong>金鑰一律遮罩</strong>，只露頭尾，所以這一段可以直接截圖給人看。
+      </p>
+    </fieldset>
 
     <fieldset>
       <legend>本機語音辨識</legend>
