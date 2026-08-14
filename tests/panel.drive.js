@@ -177,6 +177,32 @@
   check('保留「我的發言」按鈕（分頁擷取聽不到自己）',
     !!document.querySelector('#btnMic'));
 
+  // ── Chrome 內建模型：用不到就完全不要碰 ──────────────────────
+  // 每一次 LanguageModel 呼叫，只要沒帶 outputLanguage，Chrome 就會在
+  // 擴充功能的錯誤頁累積一筆「No output language was specified」。
+  // 使用者看到的是錯誤一直長出來，卻完全看不出跟什麼有關。
+  check('問內建模型狀態時有帶 outputLanguage（否則錯誤頁會一直累積警告）',
+    window.__lmCalls.length > 0 && window.__lmCalls.every((c) => c.opts && c.opts.outputLanguage),
+    JSON.stringify(window.__lmCalls));
+  check('而且不是指定 zh（Chrome 只接受 de/en/es/fr/ja，指定 zh 會直接失敗）',
+    window.__lmCalls.every((c) => c.opts.outputLanguage !== 'zh'),
+    JSON.stringify(window.__lmCalls.map((c) => c.opts.outputLanguage)));
+
+  // 走雲端時內建模型根本不會被使用，那就一次都不該碰它
+  window.__lmCalls.length = 0;
+  window.__providerInfo = {
+    provider: 'cloud', label: '雲端免費方案（Groq）', answerLabel: '雲端免費方案（Groq）',
+    free: true, supportsImages: false, needsPanel: false, panelReachable: true,
+    cloudConfigured: true, cloudCooldown: [],
+  };
+  await refreshProviderBadge();
+  await tick(); await tick();
+  check('走雲端時完全不碰內建模型（錯誤頁才不會長出警告）',
+    window.__lmCalls.length === 0, JSON.stringify(window.__lmCalls));
+  check('走雲端時徽章顯示雲端', txt('#providerBadge').includes('雲端'), txt('#providerBadge'));
+  check('走雲端時不顯示「啟用免費模型」按鈕',
+    document.querySelector('#btnLocal').classList.contains('hidden'));
+
   const failed = results.filter((x) => x.startsWith('FAIL')).length;
   const pre = document.createElement('pre');
   pre.id = 'testout';

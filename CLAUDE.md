@@ -47,11 +47,18 @@ Claude Code 橋接每次呼叫都是一個完整的 CLI session，要 10–30 �
 - **NVIDIA NIM 的模型之間差距大到不能忽略**：`llama-3.1-8b-instruct` 0.9 秒，
   `llama-3.3-70b-instruct` **87 秒**（兩者都回 200，差別純粹是排隊）。
   所以回答鏈只用 8B，70B 只留在摘要鏈的最後一格。
-- **Chrome 內建的 Gemini Nano 不支援中文輸出。** `LanguageModel.create()` 要求
-  指定 `outputLanguage`，支援清單只有 `[en, es, ja]`。不指定會在
-  `chrome://extensions` 的錯誤頁一直累積警告，指定 `zh` 直接失敗。
+- **Chrome 內建的 Gemini Nano 不支援中文輸出。** `LanguageModel` 的 API 要求
+  指定 `outputLanguage`，支援清單只有 `[de, en, es, fr, ja]`，指定 `zh` 直接失敗。
   這是個中文會議助手，回答要能照唸 —— 吐英文的模型在這裡沒有用。
   程式碼路徑留著（`fastAnswersLocal`），哪天支援中文再打開。
+
+  **沒指定 `outputLanguage` 的呼叫會在 `chrome://extensions` 的錯誤頁
+  累積警告，而且是每呼叫一次多一筆**（連 `availability()` 也算）。使用者看到的
+  是錯誤一直長出來，卻完全看不出跟什麼有關。所以兩件事都要做：
+  呼叫時一律帶 `outputLanguage: 'en'`，而且**用不到它的時候完全不要呼叫**——
+  側邊欄只在 `describe()` 回報 `needsPanel` 時才去問狀態（那是唯一會用到它的
+  情況）。踩過一次：預設走雲端之後仍然每開一次側邊欄就問一次，
+  錯誤頁上莫名其妙一直長警告。`panel.drive.js` 有兩項測試守著。
 
 ## 第 1.5 原則：金鑰絕對不能進版控
 

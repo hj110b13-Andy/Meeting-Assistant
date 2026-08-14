@@ -434,9 +434,23 @@ $('askInput').addEventListener('keydown', (e) => {
 let localSession = null;
 let localReady = false;
 
+/**
+ * 問這台機器跑不跑得動內建模型。
+ *
+ * **一定要帶 outputLanguage。** 只要呼叫 LanguageModel 的 API 而沒有指定
+ * 輸出語言，Chrome 就會在擴充功能的錯誤頁留下一筆
+ * 「No output language was specified in a LanguageModel API request」，
+ * 而且每次呼叫累積一筆 —— 使用者會看到錯誤頁上一直長出東西，
+ * 卻完全看不出跟什麼有關。
+ *
+ * 帶 'en' 而不是 'zh'：Chrome 的支援清單只有 [de, en, es, fr, ja]，
+ * 指定 zh 直接失敗。這顆模型本來就沒有中文輸出能力，這也是它預設不被
+ * 使用的原因（見 settings.js 的 resolveProvider）。
+ */
 async function localAvailability() {
   if (typeof self.LanguageModel === 'undefined') return 'unsupported';
-  try { return await self.LanguageModel.availability(); } catch { return 'unsupported'; }
+  try { return await self.LanguageModel.availability({ outputLanguage: 'en' }); }
+  catch { return 'unsupported'; }
 }
 
 /** 建立（必要時下載）本機模型。必須從使用者點擊裡呼叫。 */
@@ -520,12 +534,24 @@ async function refreshProviderBadge() {
   let info = await chrome.runtime.sendMessage({ type: 'ma:provider' });
   if (!info) return;
 
-  const avail = await localAvailability();
-  localReady = avail === 'available';
-  const unsupported = avail === 'unsupported' || avail === 'unavailable';
-  if (unsupported !== !!info.localUnsupported) {
-    await chrome.runtime.sendMessage({ type: 'ma:settings:set', patch: { localModelUnsupported: unsupported } });
-    info = await chrome.runtime.sendMessage({ type: 'ma:provider' });
+  // **只有真的可能用到內建模型時才去問它。**
+  //
+  // 每一次 LanguageModel 呼叫都會在擴充功能的錯誤頁留下一筆警告，而預設
+  // 情況下這顆模型根本不會被使用（不支援中文輸出，見 resolveProvider）——
+  // 為了一個用不到的後端，每開一次側邊欄就在錯誤頁上多一筆，
+  // 使用者只會看到錯誤一直長出來，卻看不出跟什麼有關。
+  //
+  // needsPanel 已經表示「摘要或回答其中之一解析成 chrome-ai」，
+  // 那是唯一會用到它的情況；不成立時 localUnsupported 也影響不了任何判斷。
+  let unsupported = !!info.localUnsupported;
+  if (info.needsPanel) {
+    const avail = await localAvailability();
+    localReady = avail === 'available';
+    unsupported = avail === 'unsupported' || avail === 'unavailable';
+    if (unsupported !== !!info.localUnsupported) {
+      await chrome.runtime.sendMessage({ type: 'ma:settings:set', patch: { localModelUnsupported: unsupported } });
+      info = await chrome.runtime.sendMessage({ type: 'ma:provider' });
+    }
   }
 
   // 走雲端時標示出來。使用者最常問的兩件事是「現在是誰在回答」與
