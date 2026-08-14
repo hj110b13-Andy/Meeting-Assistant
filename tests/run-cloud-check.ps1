@@ -117,6 +117,20 @@ addEventListener('error', (e) => {
 addEventListener('unhandledrejection', (e) => {
   document.getElementById('out').textContent = 'FAIL  未處理的 rejection  ->  ' + (e.reason && (e.reason.stack || e.reason));
 });
+// **把長延遲的計時器關掉。**
+//
+// --virtual-time-budget 會在頁面「閒著等網路」時快轉虛擬時鐘，於是
+// cloud.js 與 tavily.js 用 setTimeout 排的逾時 abort 會在回應還沒回來
+// 之前就觸發，把進行中的請求砍掉。實測症狀：
+//   * 串流只收到第一個 token（「為」）就被中止
+//   * Tavily 在 preflight 階段被砍，fetch 丟 TypeError: Failed to fetch
+// 兩個看起來都像「產品壞了」，其實是這個 harness 的時鐘造成的。
+//
+// 逾時邏輯本來就不是這支要驗的東西（它驗的是請求送得出去、回應收得回來），
+// 所以直接讓 >= 3 秒的計時器不生效。短計時器留著，不影響其他行為。
+const _setTimeout = window.setTimeout.bind(window);
+window.setTimeout = (fn, ms, ...rest) => (ms >= 3000 ? 0 : _setTimeout(fn, ms, ...rest));
+
 const REAL_KEYS = $keysJson;
 // keys.js 讀的是 chrome.storage.local，這裡用真金鑰餵它
 window.chrome = {
@@ -191,6 +205,11 @@ const streamed = await cloudStream({
   onDelta: (d) => chunks.push(d),
 });
 check('串流拿得到內容', !!streamed.text, JSON.stringify(streamed).slice(0, 200));
+// 被中途砍斷時 cloudStream 會回 stopReason:'truncated' 並附上原因。
+// 分開驗，才不會把「串流壞了」跟「內容不是繁體」混成同一個紅字。
+check('串流沒有被中途砍斷',
+  streamed.stopReason === 'end_turn',
+  streamed.stopReason + '　' + (streamed.error || ''));
 check('串流是繁體中文', isTraditional(streamed.text), streamed.text.slice(0, 60));
 // onDelta 有被呼叫，代表 SSE 解析器認得 Groq 真正吐出來的事件格式。
 // **不驗「分成幾塊」** —— headless 的虛擬時間會把整個回應緩衝完才交給 reader，
