@@ -6,7 +6,7 @@
 Chrome / Edge 擴充功能。**聽你瀏覽器裡正在進行的會議**（Google Meet、
 Microsoft Teams 網頁版、Jitsi Meet），用**語音辨識**即時產生：
 
-- **逐字稿**，每段都標註說話者（顏色固定，同一人永遠同色）
+- **逐字稿**，每段都標註說話者（**靠聲紋分開**，不需要開字幕；顏色固定，同一人永遠同色）
 - **滾動式重點摘要**：重點、決議、待辦（含負責人）、未解問題
 - **即時回答建議**：有人點名問你時，**約 1 秒內**給一句可以直接照唸的答案 + 2–4 個補充要點
 
@@ -21,18 +21,23 @@ Microsoft Teams 網頁版、Jitsi Meet），用**語音辨識**即時產生：
 
 ### 支援的平台
 
-| 平台 | 網域 | 逐字稿來源 | 說話者姓名 |
+| 平台 | 網域 | 逐字稿來源 | 說話者 |
 |---|---|---|---|
-| Google Meet | `meet.google.com` | 語音辨識 | 開字幕才有真名 |
-| Microsoft Teams | `teams.microsoft.com`、`teams.live.com` | 語音辨識 | 開字幕才有真名 |
-| Jitsi Meet | `meet.jit.si`、`*.8x8.vc`、自架站 | 語音辨識 | 開字幕才有真名 |
+| Google Meet | `meet.google.com` | 語音辨識 | 聲紋分群，能讀到名字就換成真名 |
+| Microsoft Teams | `teams.microsoft.com`、`teams.live.com` | 語音辨識 | 同上 |
+| Jitsi Meet | `meet.jit.si`、`*.8x8.vc`、自架站 | 語音辨識 | 同上 |
 
 **逐字稿一律來自語音辨識，不依賴平台字幕。** 這個預設在真實會議實測後反過來了：
-Meet 的字幕斷斷續續、常常整段抓不到，而語音辨識完整得多。字幕唯一的優勢是
-**帶真實姓名**（辨識只有聲音，拿不到），所以退成「誰在講話」的資料源 ——
-有開字幕時會自動用說話時間比對，把真名補到辨識出來的段落上。
+Meet 的字幕斷斷續續、常常整段抓不到，而語音辨識完整得多。
 
-沒開字幕也能用，只是說話者會顯示成「其他人（雲端辨識）」。
+說話者則拆成兩個獨立的問題（詳見
+「[說話者姓名是怎麼對上的](#說話者姓名是怎麼對上的)」）：
+
+- **這是不是同一個人？** 靠**聲紋分群**，不需要開字幕、不需要讀畫面。
+  所以就算完全沒有姓名來源，逐字稿也讀得懂 —— 會標成「講者 1」「講者 2」，
+  而且同一個人永遠是同一個編號。
+- **這個人叫什麼？** 靠參與者名單、畫面上的名牌、或會議字幕。
+  **只要對上過一次就會一直記住**，之後字幕關掉也沒關係。
 
 Teams 的字幕在 iframe 裡，所以那個平台用 `all_frames: true`。
 
@@ -60,7 +65,9 @@ Teams 的字幕在 iframe 裡，所以那個平台用 `all_frames: true`。
 > 自架站則要部署端裝了 **Jigasi** 才有字幕。
 > **但這完全不影響使用**：逐字稿本來就來自語音辨識聽分頁的聲音，
 > 字幕只是拿來補說話者姓名。沒字幕的 Jitsi 一樣有完整逐字稿，
-> 只是說話者顯示成「其他人（雲端辨識）」。
+> 說話者也照樣分得開（聲紋），只是顯示成「講者 1／2／3」而不是真名。
+> Jitsi 的發言指示器（`.dominant-speaker`）是開源程式碼裡的真實 class、
+> 沿用很多年，所以那條路在 Jitsi 上的命中率反而最高。
 >
 > 判斷某個 Jitsi 站有沒有字幕，最快的方法是查它的 config：
 >
@@ -218,8 +225,8 @@ USB 或你自己的加密筆記，別貼在聊天軟體或 email 裡。
 | 本機 whisper.cpp small | 0.47 | 約 15 秒 | 大致正確 | 沒有金鑰／要完全離線 |
 | 瀏覽器內 WASM base | 0.50 | 約 25 秒 | 這季／結帳／對帳／小陳 **全錯** | 最後的退路 |
 
-說話者標註：三者都拿不到真名（那只有平台字幕有），有字幕就補真名，
-否則標成「其他人（雲端辨識）」或「其他人（本機辨識）」。
+說話者標註跟引擎無關：三個引擎都只回文字，說話者一律由**聲紋**分開
+（標成「講者 N」），再由名單／名牌／字幕換成真名。
 
 #### 兩條音訊來源：其他人靠分頁，你自己靠麥克風
 
@@ -320,7 +327,7 @@ small：我先講一下這季的目標、結帳失敗率、目前卡在第三方
 
 **逐字稿照「說話時間」排序，不是照抵達順序。** 不同來源的延遲差很多，照抵達順序排會讓早講的話排在晚講的**後面** —— 不只難讀，送去做摘要的對話順序也是錯的，模型會誤判誰在回應誰。所以 offscreen 回報的是「這段話被說出來的時間」（由分段長度反推），`store.upsertSegment` 依它插入。
 
-**已知的取捨**：拿不到真實姓名（只有平台字幕有）。沒開字幕時全部標成「其他人（本機辨識）」，開了字幕才會用說話時間比對補上真名。RTF 是機器閒置時量的，開會時 CPU 被視訊佔用可能跟不上 —— 跟不上時會略過片段、拉長分段，並在側邊欄明確告知，而不是安靜地爛掉。
+**已知的取捨**：辨識拿不到真實姓名（聲音裡沒有姓名），所以說話者只能靠聲紋分開、再由名單／名牌／字幕換成真名。RTF 是機器閒置時量的，開會時 CPU 被視訊佔用可能跟不上 —— 跟不上時會略過片段，並在側邊欄明確告知，而不是安靜地爛掉。
 
 ### 安裝 Claude Code 橋接（選用）
 
@@ -537,8 +544,16 @@ git rebase --continue
 2. **在會議分頁點一次工具列的擴充功能圖示**（授權音訊擷取，每個分頁一次）
 3. 側邊欄會自動開始聆聽，約 15 秒後逐字稿開始出現
 
-就這樣，不需要按任何開始按鈕。想要說話者顯示**真實姓名**的話，額外在會議裡
-開啟字幕（Meet 的 **CC** 按鈕 / Teams 的「更多 → 語言和語音 → 開啟即時字幕」）——
+就這樣，不需要按任何開始按鈕。
+
+說話者會自動分開成「講者 1／2／3」（靠聲音，不需要任何設定）。**想看到真實姓名**
+的話有兩個辦法，做一個就行：
+
+- **把會議的參與者面板打開** —— 名單讀得到就對得上，一對一時更直接
+  （我以外只有一個人，那所有不是我說的話都是他說的）
+- **在會議裡開啟字幕**（Meet 的 **CC** 按鈕 / Teams 的「更多 → 語言和語音 →
+  開啟即時字幕」）—— 最可靠，而且**只要對上一次就會一直記住**，之後關掉也沒關係
+
 字幕只用來補姓名，不影響逐字稿內容。
 
 側邊欄左上圓點：🟢 聆聽中 ／ 🟡 正在啟動 ／ ⚪ 沒偵測到會議
@@ -568,7 +583,7 @@ git rebase --continue
 
 | 欄位 | 說明 |
 |---|---|
-| **我的名字／稱呼** | **一定要填。** 別人講到這些名字時才會自動準備回答建議。多寫幾種叫法（全名、綽號、英文名）比較不會漏。 |
+| **我的名字／稱呼** | **一定要填。** 兩個用途：別人講到這些名字時才會自動準備回答建議（比對範圍是**前後 20 秒**，因為人不會把名字和問題塞進同一句話）；以及把你自己從參與者名單裡排除掉，一對一才判斷得出來。多寫幾種叫法（全名、綽號、英文名）比較不會漏。 |
 | **我的背景筆記** | 回答建議會參考。寫得越具體越能直接照唸。不要放密碼或金鑰。 |
 | **摘要更新頻率** | 段數與秒數，兩個條件都成立才更新。預設 8 段 / 300 秒。 |
 
@@ -581,20 +596,36 @@ git rebase --continue
 
 ## 運作方式
 
+**逐字稿的主線是音訊**，會議分頁那條只負責補姓名。
+
 ```
-Meet / Teams 分頁
-   └─ content script（core.js + meet.js / teams.js）
-        讀取字幕 DOM → 合併串流文字 → 判斷「這句講完了」
-             │  ma:segment 訊息
-             ▼
+會議分頁 ─┬─ content script（core.js + meet/teams/jitsi.js）
+          │    ├─ 字幕 DOM     → 合併串流改寫 → 「這句講完了」
+          │    ├─ 發言指示器   → 現在誰在講話（ma:speaking）
+          │    └─ 參與者名單   → 有哪些人（分群的上界）
+          │
+          └─ 分頁音訊（tabCapture，需要點工具列圖示的手勢）
+               │
+               ▼
+        offscreen 文件
+          降取樣到 16kHz → VAD 切段 → 辨識（Groq／本機 whisper／WASM）
+          → 逐句切開（雲端有時間戳）→ 每句算一次聲紋 → 簡繁轉換
+               │  ma:segment（帶 cluster 分群 id）
+               ▼
    service worker（背景）
-        ├─ store.js      逐字稿狀態 + chrome.storage.local 備份
-        ├─ 摘要排程       累積式更新（只送新增的逐字稿，不重送整場）
-        └─ 提問偵測       中英文問句 + 是否點到你的名字 → 產生回答建議
-             │  port 廣播
-             ▼
+        ├─ store.js       逐字稿狀態、**照說話時間插入**、storage 備份
+        ├─ 說話者姓名     一對一 → 直接用名字；否則 指示器／字幕 → 學進 cluster
+        ├─ 摘要排程       兩個條件都成立才觸發（AND），失敗時退避
+        ├─ 提問偵測       問句 + **前後 20 秒**有沒有點到你的名字
+        └─ provider.js    雲端 → Claude Code 的退路，換後端一定告訴使用者
+               │  port 廣播
+               ▼
    側邊欄 UI（panel.js）
+        逐字稿／重點／問答，麥克風跟著聆聽自動開關
 ```
+
+你自己的發言走另一條：**瀏覽器內建的 `SpeechRecognition`**（分頁擷取聽不到你，
+Meet 不會把你的麥克風回放給你）。它跟著「開始聆聽」自動開關，一律標成「我」。
 
 ### 為什麼聽聲音，而不是讀字幕
 
@@ -630,6 +661,11 @@ SeaMeet 派機器人進會議拿音訊流、開源的 Meetily / Whishper / Whisp
 而且**我以外只剩一個人的時候根本不需要聲紋**：所有不是我說的話都是他說的，
 直接用他的名字。那是最可靠的一條路 —— 不依賴字幕、不依賴發言指示器、
 也不依賴聲音分不分得開。
+
+> 上界用的是「**這場會議看過的最多人數**」，不是當下的名單長度。
+> 因為名單會**暫時性地變少**：Meet 讀的是視訊磚，切到共享畫面時只剩幾個磚；
+> Teams 的參與者面板關起來就整個讀不到。用當下長度的話，名單暫時只剩一個人時
+> 會把**所有人**的話都掛到那一個人頭上 —— 而畫面上看起來完全正常。
 
 所以沒有任何姓名來源時,逐字稿仍然讀得懂 —— 會標成
 **「講者 1」「講者 2」,而且同一個人永遠是同一個編號**。
@@ -814,10 +850,17 @@ Meet 與 Teams 的字幕 DOM 都不是公開 API，名字每隔幾個月換一�
    *Extension has not been invoked for the current page*。側邊欄會給出可行動的說明，
    但這一步無法自動化 —— 那是 Chrome 的權限設計。
 
-2. **語音辨識拿不到姓名。** 三個引擎都一樣 —— 姓名只有平台字幕有，
-   所以沒開字幕時說話者只能標「其他人（雲端辨識）」或「其他人（本機辨識）」。
-   雲端辨識延遲約 1–2 秒；退到本機時約 15 秒，而且開會時 CPU 被視訊佔用可能跟不上，
-   此時會略過片段並告知。
+2. **語音辨識拿不到姓名，聲紋也拿不到。** 聲音裡沒有姓名，這是原理上的限制。
+   聲紋只能回答「這是不是同一個人」，所以沒有任何姓名來源時，說話者會標成
+   「講者 1／2／3」（同一個人永遠同一個編號）。要換成真名得靠參與者名單、
+   畫面上的名牌、或會議字幕 —— **只要對上過一次就會一直記住**。
+
+   **聲紋也不保證分得開。** 音色很接近的兩個人、或兩個人同時講話的段落，
+   仍然會混在一起。參數在 `voiceprint.js` 的 `pitchTolerance`／`residualThreshold`，
+   刻意調成偏向拆開（拆錯看得出來，併錯看不出來）。
+
+   延遲方面：雲端辨識約 1–2 秒；退到本機時約 15 秒，而且開會時 CPU 被視訊佔用
+   可能跟不上，此時會略過片段並告知。
    本機原生引擎有兩個外部條件：要跑過 `tools\install-whisper.ps1`，而且**要跑過
    `bridge\install.ps1`** —— 伺服器是由 bridge 啟動的，擴充功能自己不能執行本機程序。
    兩者缺一就會退到 WASM 備援（會明確告知）。
@@ -832,10 +875,15 @@ Meet 與 Teams 的字幕 DOM 都不是公開 API，名字每隔幾個月換一�
    摘要與回答建議吃的是逐字稿，**錯一個關鍵詞整段推論就歪了** ——
    所以側邊欄在退路上會明講現在用的是哪一個引擎。
 
-5. **免費模型有硬性能力上限。** Chrome 內建的 Gemini Nano 的 context 只有幾千 token
-   （所以回答只帶最近約 1500 字逐字稿）、**不支援圖片**，中文判斷品質與 Claude 有明顯差距。
-   看不懂圖片這件事是用**升級**處理的，不是降級：勾了「附上會議畫面」時**那一題會自動
-   改走 Claude Code**（`stream({ provider })` 蓋掉預設判斷），並在卡片上說明換了後端。
+5. **只有 Claude Code 橋接看得懂圖片。** Groq **沒有任何視覺模型**
+   （2026-08 實際問過 `/models`），Chrome 內建的 Gemini Nano 也不支援圖片。
+   所以勾了「附上會議畫面」時**那一題會自動改走 Claude Code**
+   （`stream({ provider })` 蓋掉預設判斷），並在卡片上說明換了後端 ——
+   從 1 秒變成 10–30 秒。橋接沒裝的話那一題只會依逐字稿回答，並明講原因。
+
+   > 一度想讓雲端自己看圖（填了 Groq 的 llama-4），**兩個模型名稱都回 404**。
+   > 要改候選鏈之前先跑 `powershell -File tools\list-groq-models.ps1` 看實際清單 ——
+   > 名稱錯的症狀是 404，而 404 在畫面上跟「額度用完」長得一模一樣。
 
 6. **免費模型跑在側邊欄，不是背景。** 因為首次下載必須由使用者手勢觸發，
    而 service worker 沒有手勢。實務影響：**側邊欄關著時即時回答會安靜跳過**
@@ -861,28 +909,48 @@ Meet 與 Teams 的字幕 DOM 都不是公開 API，名字每隔幾個月換一�
    這類直接稱呼。**名字沒填的話自動回答等於沒作用** —— 想針對任何問題都拿建議，
    就手動在問答分頁輸入。
 
-11. **字幕選擇器仍然脆弱。** Meet 的 DOM 每幾個月改一次，實測就遇過整組失效。
-    現在字幕只影響「說話者姓名」，失效不會讓逐字稿消失，但真名會變回
-    「其他人（本機辨識）」。
+11. **所有讀 DOM 的東西都脆弱**（字幕選擇器、發言指示器、參與者名單）。
+    Meet 的 DOM 每幾個月改一次，實測就遇過整組失效。而且有一種情況是
+    **必然**失效的：**看共享畫面時 Teams 與 Meet 根本不顯示視訊磚**，
+    名牌與指示器一起消失 —— 偏偏那正是最需要逐字稿的場合。
+
+    這也是說話者改用聲紋的原因：讀 DOM 失效只會讓真名變回「講者 N」，
+    逐字稿與分群都不受影響。要查是哪一環斷掉，看設定頁的「診斷」，
+    或在會議分頁的 console 跑 `__MA_SPEAKER_DEBUG__()`。
+
+12. **自動回答會看前後 20 秒，不是只看一句。** 因為人不會把名字和問題塞進
+    同一句話（「小陳，」→「這個是在哪裡體現？」）。同一次點名只會產生
+    一張卡片，避免一塊音訊切成好幾句時重複回答。
 
 ## 測試
 
 ```
-powershell -ExecutionPolicy Bypass -File tests\run.ps1            # 行為測試（256 項）
-powershell -ExecutionPolicy Bypass -File tests\check-project.ps1  # 專案一致性（52 項）
+powershell -ExecutionPolicy Bypass -File tests\run.ps1            # 行為測試（479 項）
+powershell -ExecutionPolicy Bypass -File tests\check-project.ps1  # 專案一致性（95 項）
 ```
 
-`check-project.ps1` 抓的是「行為測試跑得過、但東西還是壞的」那一類問題：`.ps1` 有沒有 UTF-8 BOM、`host.bat` 是不是 CRLF、`manifest.json` 提到的檔案存不存在、**橋接與擴充功能用的埠號有沒有對上**（不對上時 `fetch` 只會說 `Failed to fetch`）、`offscreen.html` 的腳本載入順序、以及 `src/` 下每個 `.js` 的語法。
+**兩個都要綠才能推。**
 
-這個專案沒有 Node/npm，所以直接把 **Chrome 當測試執行環境**：每個測試頁把 `chrome.*` API 換成 stub，載入**真正的原始碼**（不是複本），再用 `--headless --dump-dom` 把結果讀回來。目前 **324 項行為測試 + 61 項專案檢查**，分六組：
+`check-project.ps1` 抓的是「行為測試跑得過、但東西還是壞的」那一類問題：
+`.ps1` 有沒有 UTF-8 BOM、`host.bat` 是不是 CRLF、有沒有底線開頭的檔名、
+`manifest.json` 提到的檔案存不存在、**橋接與擴充功能用的埠號有沒有對上**
+（不對上時 `fetch` 只會說 `Failed to fetch`）、`offscreen.html` 的腳本載入順序、
+**版控裡有沒有夾帶 API 金鑰**、**側邊欄文案有沒有指向已經移除的東西**、
+**`panel.js` 取用的每個 `#id` 是否真的存在**（漏一個會讓整支腳本在頂層丟例外、
+側邊欄變空白）、以及 `src/` 下每個 `.js` 的語法。
+
+這個專案沒有 Node/npm，所以直接把 **Chrome 當測試執行環境**：每個測試頁把
+`chrome.*` API 換成 stub，載入**真正的原始碼**（不是複本），再用
+`--headless --dump-dom` 把結果讀回來。目前 **479 項行為測試 + 95 項專案檢查**，分七組：
 
 | 測試組 | 內容 |
 |---|---|
-| 字幕擷取引擎 | 用合成的 Meet / Teams / Jitsi 字幕 DOM 驅動引擎：串流改寫合併、視窗滑動、定稿時機、換人講話、節點重用，以及**已知選擇器全部失效時的退路**（Meet 靠 `role="region"`＋結構、Teams 靠 `data-tid*=` 與 `data-caption-id`） |
+| 字幕擷取引擎 | 用合成的 Meet / Teams / Jitsi 字幕 DOM 驅動引擎：串流改寫合併、視窗滑動、定稿時機、換人講話、節點重用、**已知選擇器全部失效時的退路**，以及**發言指示器的偵測**（可見性、名字要對得上名單、同時兩個人在講就不給名字） |
 | 逐字稿狀態 | 定稿去重、partial 生命週期、重整分頁不清空、換會議要清空、**照說話時間插入**、摘要排程（AND 門檻與失敗退避）、Markdown 匯出 |
-| 側邊欄 UI | 載入**真正的** `panel.html` + `panel.js`，餵一份逼真的 state，檢查逐字稿／重點／問答三個分頁、搜尋高亮、串流增量、未讀徽章、錯誤橫幅、無字幕等待期 |
-| 背景邏輯 | 把 `fetch` 與 Native Messaging 換成 stub：提問偵測、SSE 串流解析（含事件被切在 chunk 邊界）、請求形狀、結構化摘要、錯誤中文化、附畫面時的後端升級、**原生辨識啟動失敗自動退到 WASM**、設定遷移、**雲端候選鏈與 429 退避**、**金鑰遮罩與貼錯欄位偵測**、**沒有金鑰時不解析成雲端**、Tavily 的查證判斷 |
-| 音訊處理 | 重疊去重、靜音門檻、降取樣、**WAV 編碼**、本機跟不上時丟最舊的、**雲端積壓時改成合併而不是丟棄**、兩種引擎的 HTTP 請求形狀、額度／金鑰錯誤的訊息可讀性 |
+| 側邊欄 UI | 載入**真正的** `panel.html` + `panel.js`，餵一份逼真的 state，檢查三個分頁、搜尋高亮、串流增量、未讀徽章、錯誤橫幅、**麥克風跟著聆聽自動開關**、**每個辨識引擎都有自己的說明**、**沒有真名時的提示** |
+| 設定頁 | 載入**真正的** `options.html` + `options.js`：存檔與重讀、金鑰遮罩、貼錯欄位偵測、只有一顆儲存按鈕、金鑰留空不會洗掉已存的 |
+| 背景邏輯 | 把 `fetch` 與 Native Messaging 換成 stub：提問偵測（**含名字與問句分在不同段落**）、SSE 串流解析（含事件被切在 chunk 邊界）、請求形狀、結構化摘要、附畫面時的後端升級、**原生辨識啟動失敗自動退到 WASM**、設定遷移、**雲端候選鏈與 429 退避**、**金鑰遮罩**、**說話者姓名的三個來源與名單上界**、Tavily 的查證判斷 |
+| 音訊處理 | 重疊去重、靜音門檻、降取樣、**WAV 編碼**、本機跟不上時丟最舊的、**雲端積壓時改成合併而不是丟棄**、**逐句切分與時間換算**、**聲紋分群**（基頻、去共同成分、上界）、額度／金鑰錯誤的訊息可讀性 |
 | 簡繁轉換 | 實測會議句子、一對多字（发→發／髮、干→乾／幹）、台灣用字、繁體輸入不被弄壞、冪等性、邊界 |
 
 引擎測試把 `setInterval` 和 `Date.now` 換成可控的假時鐘，所以整個擷取流程是**同步、確定性**地跑完，不靠 sleep 等待。
@@ -899,21 +967,22 @@ powershell -ExecutionPolicy Bypass -File tests\check-project.ps1  # 專案一致
 
 ```
 manifest.json                 MV3 設定
-src/content/core.js           字幕擷取引擎（平台無關）：合併、定稿、回報
+
+── 會議分頁（content script）────────────────────────────────
+src/content/core.js           字幕擷取引擎（平台無關）：合併、定稿、回報，
+                              以及「現在誰在講話」的發言指示器偵測
 src/content/meet.js           Google Meet 選擇器
 src/content/teams.js          Teams 選擇器
 src/content/jitsi.js          Jitsi Meet 選擇器 + 「名字: 內容」切分
+
+── 音訊（offscreen 文件）──────────────────────────────────
+src/offscreen/offscreen.html  載入順序（s2t → voiceprint → offscreen）
 src/offscreen/offscreen.js    音訊擷取 + VAD 切段 + 三個引擎的排程（含雲端節流與合併）
+src/offscreen/voiceprint.js   聲紋分離：MFCC ＋ 基頻 ＋ 線上分群（標成「講者 N」）
 src/offscreen/whisper-worker.js  WASM 備援引擎（跑在 Worker，主執行緒才收得到音訊）
-src/lib/s2t.js                簡體→繁體轉換（本機辨識輸出用）
-src/lib/s2t-table.js          對照表（自動產生，勿手改）
-tools/install-whisper.ps1     安裝原生 whisper.cpp 到 %LOCALAPPDATA%（純 ASCII 路徑）
-tools/gen-s2t.ps1             從 OpenCC 字典產生 s2t-table.js
-tools/.opencc/                OpenCC 原始字典的快取（可刪，刪了會重新下載）
-vendor/                       WASM 備援用的 whisper-base 模型與 ONNX Runtime（約 99MB）
-tools/fetch-vendor.ps1        下載 vendor/ 的內容
-tests/run-vendor-check.ps1    封鎖 DNS 驗證離線可用
-src/background/service-worker.js  訊息路由、摘要排程、提問偵測、問答、存檔
+
+── 背景（service worker）──────────────────────────────────
+src/background/service-worker.js  訊息路由、摘要排程、提問偵測、問答、說話者姓名的判定
 src/background/store.js       逐字稿狀態、照說話時間插入、持久化、Markdown 匯出
 src/background/settings.js    設定的單一來源 + 後端自動判定 + 一次性遷移
 src/background/provider.js    模型後端切換層（雲端 / Claude Code / Chrome 內建，都免費）
@@ -923,24 +992,54 @@ src/background/tavily.js      網路查證（只在問題指向會議之外時�
 src/background/localmodel.js  Chrome 內建模型：把推論委派給側邊欄
 src/background/claudecode.js  Claude Code 後端（Native Messaging，用 Pro 額度）
 src/background/whisper-native.js  原生辨識伺服器的啟動與生命週期（另開一條 native 連線）
+
+── UI ──────────────────────────────────────────────────────
+src/sidepanel/panel.html      側邊欄結構（按鈕刻意只留五顆）
+src/sidepanel/panel.js        渲染、麥克風、手動摘要、後端徽章
+src/sidepanel/panel.css       樣式（說話者顏色由名字雜湊決定，同一人永遠同色）
+src/options/options.html      設定頁（只有一顆儲存按鈕，存整頁）
+src/options/options.js        存檔、金鑰測試、診斷
+
+── 共用 ────────────────────────────────────────────────────
+src/lib/s2t.js                簡體→繁體轉換（辨識輸出用）
+src/lib/s2t-table.js          對照表（自動產生，勿手改）
+
+── 橋接與工具 ──────────────────────────────────────────────
 bridge/host.ps1               Native Messaging 主機（stdio 協定、呼叫 claude.exe、管辨識伺服器）
+bridge/host.bat               啟動器（**Big5 編碼、CRLF**，見下方警告）
 bridge/install.ps1            註冊橋接 + 自我測試（-Uninstall 可移除）
-src/sidepanel/                側邊欄 UI
-src/options/                  設定頁
-tests/run.ps1                 測試執行器（用 headless Chrome 跑）
-tests/check-project.ps1       專案一致性檢查（編碼、manifest、埠號、JS 語法、金鑰外洩）
+tools/install-whisper.ps1     安裝原生 whisper.cpp 到 %LOCALAPPDATA%（純 ASCII 路徑）
+tools/fetch-vendor.ps1        下載 vendor/ 的 WASM 備援引擎
+tools/gen-s2t.ps1             從 OpenCC 字典產生 s2t-table.js
+tools/list-groq-models.ps1    問 Groq「這個帳號現在有哪些模型」（改候選鏈前先跑）
+vendor/                       WASM 備援用的 whisper-base 模型與 ONNX Runtime（約 99MB，不進版控）
+
+── 測試 ────────────────────────────────────────────────────
+tests/run.ps1                 測試執行器（用 headless Chrome 跑七組測試頁）
+tests/check-project.ps1       專案一致性檢查（編碼、manifest、埠號、JS 語法、金鑰外洩、側邊欄文案）
+tests/*.test.html             五個測試頁（引擎／逐字稿／背景／音訊／簡繁）
+tests/panel.stub.js           側邊欄測試的 chrome.* stub
+tests/panel.drive.js          驅動真正的 panel.html + panel.js
+tests/options.stub.js         設定頁測試的 stub
+tests/options.drive.js        驅動真正的 options.html + options.js
+tests/speech.js               16.6 秒的真實中文會議錄音（base64），給雲端驗證用
 tests/run-cloud-check.ps1     雲端端到端驗證（真金鑰打真 API，選用）
-tests/*.test.html             六組測試頁
+tests/run-vendor-check.ps1    封鎖 DNS 驗證離線可用（選用）
+tests/vendor-whisper.html     上面那支用的測試頁
+
 API Key.txt                   你自己的金鑰備忘（已被 .gitignore 擋住，不會進版控）
 ```
 
 > **擴充功能資料夾裡不能有底線開頭的檔名或資料夾。** Chrome 保留 `_` 開頭給自己用（`_metadata`、`_locales`），
 > 遇到就整個拒絕載入，錯誤是 *Cannot load extension with file or directory name X. Filenames starting with "_" are reserved for use by the system.*
-> 這會擋掉**整個**擴充功能，不只是那個資料夾。放暫存檔時要避開這個字首。
->
-> 另外 `d:\Claude\zz-whisper-delete-after-reboot\` 如果還在，重開機後可以直接刪掉（約 53 MB）。
-> 那是把 whisper.cpp 誤裝在專案裡（中文路徑）時留下的殘骸 —— 當時有兩個 `whisper-server` / `whisper-cli`
-> 程序卡在 OpenBLAS 的執行緒收尾而無法終止，連 `taskkill /F` 都殺不掉，把 DLL 鎖住了。已經搬出專案，不影響載入。
+> 這會擋掉**整個**擴充功能，不只是那個資料夾。
+> 最容易忘的來源是 **Chrome 自己的 user-data-dir** —— 測試腳本開 headless Chrome 時
+> 如果把 `--user-data-dir` 指到專案裡，Chrome 會在那底下建 `_locales`／`_metadata`，
+> 於是**跑一次測試就把擴充功能弄壞了**。所有 `--user-data-dir` 一律指到 `%TEMP%`。
+
+> **`bridge/host.bat` 是 Big5 編碼，不是 UTF-8。** 用以 UTF-8 讀寫的編輯工具改它，
+> 裡面的中文註解會變成不可逆的亂碼。而且終端機顯示本來就會亂碼，
+> 所以「看起來亂」不代表壞了 —— 要看實際位元組才分得出來。
 
 ### 為什麼原生辨識另開一條 Native Messaging 連線
 
@@ -952,7 +1051,23 @@ API Key.txt                   你自己的金鑰備忘（已被 .gitignore 擋�
 
 ## 除錯
 
-- **側邊欄空白／沒反應**：`chrome://extensions` → 這個擴充功能 → 點「Service Worker」看背景 console
-- **抓不到字幕**：在會議分頁按 F12，看 console 有無錯誤；確認字幕真的開了；Teams 的會議在 iframe 裡，manifest 已設 `all_frames: true`
-- **摘要／問答沒出現**：側邊欄上方紅色橫幅會顯示 API 錯誤原因（金鑰、額度、模型名稱）
-- 改完程式碼後要在 `chrome://extensions` 按 ↻ 重新載入，content script 的改動還需要重新整理會議分頁
+**先看設定頁的「診斷」按鈕。** 它會印出目前的設定、遮罩後的金鑰（可以安心截圖）、
+現在會走哪條路，以及**說話者姓名斷在哪一環**（有沒有偵測到發言指示器、
+字幕開了沒、參與者名單讀不讀得到、最近記到誰在講話）。
+
+- **側邊欄空白／沒反應**：`chrome://extensions` → 這個擴充功能 → 點「Service Worker」看背景 console。
+  空白最常見的原因是 `panel.js` 在頂層丟了例外（例如取用一個不存在的元素），
+  那會讓整支腳本停掉 —— `check-project.ps1` 有一項在守這件事
+- **說話者都是「講者 N」，沒有真名**：表示三個姓名來源都沒讀到。
+  在會議分頁按 F12 跑 `__MA_SPEAKER_DEBUG__()`，它會列出每一條候選選擇器的命中數、
+  參與者名單、以及目前偵測到誰在講話
+- **講者數量比實際人數多**：參與者名單沒讀到（那是分群的上界）。
+  把會議的參與者面板打開再試
+- **抓不到字幕**：在會議分頁按 F12 看 console；確認字幕真的開了；
+  Teams 的會議在 iframe 裡，manifest 已設 `all_frames: true`
+- **摘要／問答沒出現**：側邊欄上方的橫幅會顯示原因（金鑰、額度、模型名稱、換了後端）
+- **「附上會議畫面」出錯**：那條路需要 Claude Code 橋接。橋接會在 `claude.exe`
+  路徑失效時自己重新找一次（Claude Code 的 VS Code 擴充功能更新會換版號資料夾），
+  真的找不到才會報錯 —— 那時跑一次 `bridge\install.ps1`
+- 改完程式碼後要在 `chrome://extensions` 按 ↻ 重新載入，
+  **content script 的改動還需要重新整理會議分頁**

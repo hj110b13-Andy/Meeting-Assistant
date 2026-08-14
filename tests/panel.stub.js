@@ -53,7 +53,7 @@ window.chrome = {
       if (msg.type === 'ma:snapshot') return { ok: true, dir: '會議助手', saved: ['逐字稿.md', '畫面.png'] };
       // 側邊欄啟動時會讀設定，決定要不要自動開麥克風／本機辨識
       if (msg.type === 'ma:settings:get') {
-        return { sttAuto: true, sttEngine: 'whisper-native', captureScreen: false };
+        return { sttEngine: 'whisper-native', captureScreen: false };
       }
       // 側邊欄要先問背景哪個分頁是會議分頁，才能對它擷取音訊
       if (msg.type === 'ma:meetingTab') return { tabId: window.__meetingTabId ?? 77 };

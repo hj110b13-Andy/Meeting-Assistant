@@ -21,7 +21,7 @@ const SETTINGS = {
   autoAnswer: true,
   // 後端已經寫死：摘要走 Claude Code、即時回答走本機模型，兩者都免費。
   provider: 'claude-code', fastAnswersLocal: true,
-  sttEngine: 'whisper-native', sttNativeModel: 'small', sttAuto: true,
+  sttEngine: 'whisper-native', sttNativeModel: 'small',
 };
 // 雲端金鑰。預設空的：既有測試驗的是「沒有金鑰時退回免費本機路線」的行為。
 const KEYS = {};
@@ -1213,42 +1213,79 @@ window.store = window.__module_store;
   check('把「我以外的人數」當成分群上界送給 offscreen',
     rosterCap?.max === 2, JSON.stringify(rosterCap));
 
-  // ── 只剩一個人的時候根本不需要聲紋 ────────────────────────────
+  // ── 名單暫時變少時不能誤判成一對一 ──────────────────────────
   //
-  // 我以外只有一個人，那所有不是我說的話都是他說的。這是最可靠的一條路：
-  // 不依賴字幕、不依賴發言指示器，也不依賴聲音分不分得開。
+  // **這是最危險的一種錯。** Meet 的 participants() 讀的是視訊磚，而切到
+  // 共享畫面時只剩少數幾個磚；Teams 的參與者面板關起來就整個讀不到。
+  // 用「當下的名單長度」判斷一對一的話，名單暫時只剩一個人時會把**所有人**
+  // 的話都掛到那一個人頭上 —— 而畫面上看起來完全正常。
+  // 所以判斷要用「這場會議看過的最多人數」。
   await send({
     type: 'ma:status',
     payload: { platform: 'google-meet', captionsFound: false, sessionId: 'sess-name',
       title: '週會', url: 'https://meet.google.com/name',
-      participants: ['小陳', '王小明'] },
+      participants: ['小陳', '王小明'] },     // 共享畫面：只剩一個磚看得到
   });
   await settle();
-  const rosterCap1 = window.__sentToRuntime.filter((m) => m.type === 'ma:offscreen:speakers').at(-1);
-  check('一對一時上界收到 1', rosterCap1?.max === 1, JSON.stringify(rosterCap1));
+  await send(heardIn('shrink1', '這時候名單暫時只剩一個人。', T + 1010000, 4));
+  await settle();
+  check('名單暫時只剩一人時不會把所有人的話掛到他頭上',
+    speakerOf('shrink1') === '講者 4', speakerOf('shrink1'));
+  const caps = window.__sentToRuntime.filter((m) => m.type === 'ma:offscreen:speakers');
+  check('分群上界只會往上，不會因為名單暫時變少而收回去',
+    caps.at(-1)?.max === 2, JSON.stringify(caps.map((m) => m.max)));
 
-  await send(heardIn('solo1', '那我先講一下進度。', T + 1000000, 7));
+  // ── 換一場會議要整個重來 ────────────────────────────────────
+  // 否則上一場的名單與學到的姓名會掛到這一場的聲音上。
+  window.__sentToRuntime.length = 0;
+  await send({
+    type: 'ma:status',
+    payload: { platform: 'google-meet', captionsFound: false, sessionId: 'sess-solo',
+      title: '一對一', url: 'https://meet.google.com/solo', participants: ['小陳', '王小明'] },
+  });
+  await settle();
+  const soloCap = window.__sentToRuntime.filter((m) => m.type === 'ma:offscreen:speakers').at(-1);
+  check('換一場會議後上界重新算（不沿用上一場的 2）',
+    soloCap?.max === 1, JSON.stringify(soloCap));
+
+  // ── 只剩一個人的時候根本不需要聲紋 ────────────────────────────
+  //
+  // 我以外只有一個人，那所有不是我說的話都是他說的。這是最可靠的一條路：
+  // 不依賴字幕、不依賴發言指示器，也不依賴聲音分不分得開。
+  const solo = (id, text, startedAt, cluster) => ({
+    type: 'ma:segment',
+    payload: { id, speaker: cluster ? `講者 ${cluster}` : '其他人（雲端辨識）', text, final: true,
+      ts: Date.now(), startedAt, source: 'audio', platform: 'audio-fallback', cluster,
+      sessionId: 'sess-solo', title: '一對一' },
+  });
+  await send(solo('solo1', '那我先講一下進度。', T + 1000000, 7));
   await settle();
   check('一對一時直接用那個人的名字，不用等字幕也不用聲紋',
     speakerOf('solo1') === '王小明', speakerOf('solo1'));
 
   // 連聲紋都算不出來（cluster=0）也一樣要對
-  await send(heardIn('solo2', '這段連聲紋都算不出來。', T + 1001000, 0));
+  await send(solo('solo2', '這段連聲紋都算不出來。', T + 1001000, 0));
   await settle();
   check('聲紋算不出來時，一對一仍然叫得出名字',
     speakerOf('solo2') === '王小明', speakerOf('solo2'));
 
-  // 名單讀不到時要退回原本的行為，不能把上一場的人名黏在這一場
+  // 上一場學到的姓名不能黏過來
   await send({
     type: 'ma:status',
-    payload: { platform: 'google-meet', captionsFound: false, sessionId: 'sess-name',
-      title: '週會', url: 'https://meet.google.com/name', participants: [] },
+    payload: { platform: 'google-meet', captionsFound: false, sessionId: 'sess-fresh',
+      title: '另一場', url: 'https://meet.google.com/fresh', participants: [] },
   });
   await settle();
-  await send(heardIn('solo3', '名單讀不到的時候。', T + 1002000, 9));
+  await send({
+    type: 'ma:segment',
+    payload: { id: 'fresh1', speaker: '講者 7', text: '新的一場會議。', final: true,
+      ts: Date.now(), startedAt: T + 1100000, source: 'audio', platform: 'audio-fallback',
+      cluster: 7, sessionId: 'sess-fresh', title: '另一場' },
+  });
   await settle();
-  check('名單讀不到時退回「講者 N」，不會沿用上一份名單',
-    speakerOf('solo3') === '講者 9', speakerOf('solo3'));
+  check('換一場會議時清掉上一場學到的姓名（同一個 cluster 不會沿用舊名字）',
+    store.getState().segments.find((s) => s.id === 'fresh1')?.speaker === '講者 7',
+    store.getState().segments.find((s) => s.id === 'fresh1')?.speaker);
 
   // 選擇器失效時「說話者」會抓到介面文字，那絕對不能被安到某段音訊頭上
   await send(cap('c3', 'arrow_drop_down', '展開', T + 200000, T + 200000));

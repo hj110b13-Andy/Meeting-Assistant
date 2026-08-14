@@ -61,10 +61,11 @@ export const DEFAULT_SETTINGS = {
   sttModel: 'Xenova/whisper-base',   // 原生起不來時的 WASM 備援
   sttTraditional: true,              // 辨識結果轉繁體（台灣用字）
 
-  // 音訊優先：進到會議就直接開始聽分頁聲音，不等字幕。
-  // 平台字幕實測斷斷續續又常抓不到（Meet 的 DOM 每幾個月改一次），
-  // 本機 whisper 反而穩定得多；字幕改成只拿來校正說話者姓名（見 core.js）。
-  sttAuto: true,
+  // 這裡曾經有 sttAuto（「進到會議就自動開始聽分頁聲音」）。**拿掉了，
+  // 因為那件事做不到**：chrome.tabCapture.getMediaStreamId 要求呼叫發生在
+  // 使用者手勢的脈絡裡，計時器觸發的一定被拒。留著一個永遠不會被讀取的
+  // 開關，只會讓下一個人以為自動啟動是可設定的，然後去找它為什麼沒生效。
+  // 唯一可用的手勢來源是點工具列圖示，見 service-worker 的 onClicked。
 
   // 提問時附上會議畫面截圖。預設關閉：多花 10–20 秒，而且多耗一次 Pro 額度。
   captureScreen: false,

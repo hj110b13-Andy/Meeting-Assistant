@@ -8,8 +8,7 @@ let unseenInsights = 0;
 let unseenQa = 0;
 let activeTab = 'transcript';
 let summaryRunning = false;    // 顯示在狀態列，也讓「✦ 產生重點」在進行中停用
-// 側邊欄需要知道 sttAuto（自動聽分頁聲音）與 captureScreen（提問預設附畫面）。
-// 在 loadSettings() 填入。
+// 側邊欄只需要 captureScreen（提問時預設要不要附畫面）。在 loadSettings() 填入。
 let settings = null;
 
 // ── 說話者顏色：同一個名字永遠同一個色 ──────────────────────────

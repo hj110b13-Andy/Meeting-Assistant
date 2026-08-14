@@ -148,6 +148,9 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
         // 這則訊息是從會議分頁的 content script 送來的，sender.tab.id 才是對的。
         if (sender?.tab?.id) meetingTabId = sender.tab.id;
         const changed = store.startMeetingIfNeeded(msg.payload);
+        // 換一場會議就換一批人：名單、學到的姓名、字幕記到的說話者
+        // 全部要清掉，否則上一場的人名會被掛到這一場的聲音上。
+        if (changed) resetRoster();
         store.setStatus({
           captionsFound: msg.payload.captionsFound,
           platform: msg.payload.platform,
@@ -431,18 +434,41 @@ const clusterNames = new Map();
  * 不依賴字幕、不依賴發言指示器、也不依賴聲音分得開不分得開。
  */
 let otherParticipants = [];
+/**
+ * 這場會議看過的**最多**人數（我以外）。
+ *
+ * 刻意用最大值而不是當下的名單長度，因為**名單會暫時性地變少**：
+ * Meet 的 `participants()` 讀的是視訊磚，而切到共享畫面時只剩少數幾個磚；
+ * Teams 的參與者面板關起來就整個讀不到。
+ *
+ * 用當下的長度會出現最糟的一種錯：名單暫時只剩一個人時，
+ * 下面的一對一捷徑會**把所有人的話都掛到那一個人頭上**，
+ * 而畫面上看起來完全正常。用最大值就不會 —— 曾經看過三個人，
+ * 就永遠不會再退回「只有一個人」的判斷。
+ */
+let rosterMax = 0;
+
+function resetRoster() {
+  otherParticipants = [];
+  rosterMax = 0;
+  clusterNames.clear();
+  recentCaptionSpeakers.length = 0;
+}
 
 function updateRoster(participants, myNames) {
   const mine = (myNames || '').split(/[,，、\s]+/).filter(Boolean);
   const next = (participants || [])
     .map((p) => String(p || '').trim())
     .filter((p) => p && !mine.some((m) => p.includes(m) || m.includes(p)));
-  const changed = next.join('|') !== otherParticipants.join('|');
+
+  const before = rosterMax;
   otherParticipants = next;
-  if (!changed) return;
+  rosterMax = Math.max(rosterMax, next.length);
+  if (rosterMax === before) return;
+
   // 讓 offscreen 把分群上限收到實際人數。收不到回覆沒關係（還沒開始聆聽）。
   chrome.runtime.sendMessage(
-    { type: 'ma:offscreen:speakers', max: otherParticipants.length },
+    { type: 'ma:offscreen:speakers', max: rosterMax },
     () => void chrome.runtime.lastError);
 }
 
@@ -452,7 +478,11 @@ function resolveSpeakerName(seg) {
 
   // **只有一個人的時候直接用他的名字。** 不必問聲紋，也不必等字幕 ——
   // 我以外只有一個人，那所有不是我說的話都是他說的。
-  if (otherParticipants.length === 1) {
+  //
+  // 條件用 rosterMax 而不是當下的名單長度：名單會暫時性地變少
+  // （共享畫面時 Meet 只剩少數視訊磚），那時候用當下長度會把**所有人**的話
+  // 掛到剩下的那一個人頭上，而且看起來完全正常。
+  if (rosterMax === 1 && otherParticipants.length === 1) {
     if (cluster) clusterNames.set(cluster, otherParticipants[0]);
     return otherParticipants[0];
   }

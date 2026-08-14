@@ -153,6 +153,30 @@ foreach ($p in $pages) {
   }
 }
 
+# ── README 寫的項數要跟實際跑出來的一致 ────────────────────────
+#
+# 這是**文件漂移的迴歸測試**。README 一度寫著「256 項 / 52 項」，
+# 而實際是 479 / 95 —— 一個差了將近一倍的數字，卻沒有任何東西會發現，
+# 因為文件不會被執行。看到那個數字的人會以為測試涵蓋範圍比實際小很多。
+#
+# 只在測試全綠時檢查：紅的時候項數本來就會少，那時再抱怨文件只是噪音。
+if ($totalFail -eq 0) {
+  $readme = Join-Path (Split-Path -Parent $PSScriptRoot) 'README.md'
+  if (Test-Path $readme) {
+    $text = [IO.File]::ReadAllText($readme, [Text.UTF8Encoding]::new($false))
+    $claims = [regex]::Matches($text, '行為測試（(\d+) 項）|(\d+) 項行為測試')
+    foreach ($c in $claims) {
+      $n = if ($c.Groups[1].Success) { $c.Groups[1].Value } else { $c.Groups[2].Value }
+      if ([int]$n -ne $totalPass) {
+        Write-Host ''
+        Write-Host "  FAIL  README 寫「$n 項」行為測試，實際是 $totalPass 項" -ForegroundColor Red
+        Write-Host '        文件不會被執行，所以這種漂移只能靠這裡抓。請更新 README。' -ForegroundColor DarkGray
+        $totalFail++
+      }
+    }
+  }
+}
+
 Write-Host ''
 if ($totalFail -eq 0) {
   Write-Host "全部通過：$totalPass 項" -ForegroundColor Green
