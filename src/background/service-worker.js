@@ -282,24 +282,54 @@ function reportError(err) {
 }
 
 /**
- * 字幕最近講過話的人，用來替本機辨識的段落補上真實姓名。
+ * 「誰在什麼時間區間講話」，用來替音訊段落補上真實姓名。
  *
- * whisper 拿不到姓名（它只有聲音），平台字幕才有。字幕本身斷斷續續、
- * 不適合當逐字稿，但「誰在講話」這個資訊仍然可靠，所以留下來做校正：
- * 音訊段落落在某則字幕的時間附近時，就借用那則字幕的說話者。
+ * whisper **完全不做說話者分離**（它只有聲音，回來的就是一整段文字），
+ * 真實姓名只有平台字幕有。字幕本身斷斷續續、不適合當逐字稿，但「誰在講話」
+ * 這個資訊仍然可靠，所以留下來做校正。
+ *
+ * ## 為什麼記的是「區間」而不是「時間點」
+ *
+ * 一則字幕會持續好幾秒（而且會被串流改寫、同一個 id 定稿多次）。只記一個
+ * 時間點的話，比對就變成「離哪一點最近」—— 一句講了 8 秒的話，後半段
+ * 可能離下一個人的起點更近，於是被安到還沒開口的人頭上。
+ * 記成 [from, to] 就能直接問「這個時間點誰在講話」。
  *
  * 只保留最近的幾筆 —— 這是即時比對，不需要整場歷史。
  */
 const recentCaptionSpeakers = [];
-const SPEAKER_MEMORY = 12;
-const SPEAKER_MATCH_MS = 20000;   // 本機辨識延遲約 15–18 秒，抓寬一點
+const SPEAKER_MEMORY = 24;
+/**
+ * 落在所有區間之外時，容許離最近的區間多遠還算同一個人。
+ *
+ * 兩邊的時間都是**說話時間**（音訊段落用 whisper 的相對秒數換算，字幕用
+ * 偵測到的時間），所以誤差來源只有「平台產生字幕的延遲」，實測 1–3 秒。
+ * 6 秒留了兩倍餘裕。
+ *
+ * **不要放寬成 20 秒**（原本是）。那個數字是照本機辨識的處理延遲設的，
+ * 但延遲早就不影響比對了 —— 比的是說話時間。放這麼寬的後果是安靜地
+ * 掛錯人：20 秒內通常已經換過人，而「張三說了李四的話」在畫面上
+ * 看起來完全正常，只有當事人自己看得出不對。
+ */
+const SPEAKER_MATCH_MS = 6000;
 
 function rememberCaptionSpeaker(seg) {
   const speaker = seg.speaker;
   if (!speaker || speaker === '未標註') return;
   // 選擇器抓錯時「說話者」可能是介面文字，記進去會把它安到某段音訊頭上
   if (looksLikeChrome(speaker)) return;
-  recentCaptionSpeakers.push({ speaker, at: seg.startedAt || seg.ts || Date.now() });
+
+  const from = seg.startedAt || seg.ts || Date.now();
+  const to = Math.max(from, seg.ts || from);
+  const last = recentCaptionSpeakers[recentCaptionSpeakers.length - 1];
+  // 同一個人連續講：延長區間而不是多記一筆。字幕會被串流改寫，同一句話
+  // 會定稿好幾次 —— 每次都記一筆的話 SPEAKER_MEMORY 會被一個人塞滿，
+  // 前面其他人的區間全部被擠掉。
+  if (last && last.speaker === speaker && from - last.to < 8000) {
+    last.to = Math.max(last.to, to);
+    return;
+  }
+  recentCaptionSpeakers.push({ speaker, from, to });
   if (recentCaptionSpeakers.length > SPEAKER_MEMORY) recentCaptionSpeakers.shift();
 }
 
@@ -323,11 +353,21 @@ function looksLikeChrome(text) {
   return CHROME_TEXT.some((re) => re.test(t));
 }
 
-/** 找出這段音訊「說話當下」字幕記到的是誰；找不到就回傳 null */
+/**
+ * 這個時間點字幕記到的是誰在講話；不知道就回傳 null。
+ *
+ * 先找「時間點真的落在區間裡」的，那是確定的答案。都沒有才退而求其次
+ * 找最近的區間，而且要在 SPEAKER_MATCH_MS 之內 —— 寧可顯示佔位標籤，
+ * 也不要把話掛到錯的人身上。掛錯的話畫面上看起來完全正常，
+ * 只有當事人自己看得出不對，而摘要與回答建議已經被帶歪了。
+ */
 function speakerAt(ts) {
+  for (const c of recentCaptionSpeakers) {
+    if (ts >= c.from && ts <= c.to) return c.speaker;
+  }
   let best = null;
   for (const c of recentCaptionSpeakers) {
-    const gap = Math.abs(c.at - ts);
+    const gap = ts < c.from ? c.from - ts : ts - c.to;
     if (gap > SPEAKER_MATCH_MS) continue;
     if (!best || gap < best.gap) best = { speaker: c.speaker, gap };
   }

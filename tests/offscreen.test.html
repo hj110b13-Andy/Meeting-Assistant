@@ -177,7 +177,11 @@ check('伺服器回非 200 時丟出可讀的錯誤', threw.includes('503'), thr
 // 而且逐字稿一字未錯。
 window.fetch = async (url, opts) => {
   lastRequest = { url, opts };
-  return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ text: ' 这是云端结果 ' }) };
+  return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({
+    text: ' 这是云端结果 ',
+    // verbose_json 會多回每一句的相對秒數，那是「一句一個說話者」的基礎
+    segments: [{ start: 0, end: 2.5, text: ' 这是云端结果 ' }],
+  }) };
 };
 engineName = 'groq';
 cloudKey = 'gsk_test';
@@ -200,8 +204,31 @@ check('帶繁體提示詞（用來指定書寫系統）',
   String(lastRequest?.opts?.body?.get('prompt')).includes('繁體'),
   String(lastRequest?.opts?.body?.get('prompt')));
 check('temperature 設 0（辨識要可重現）', lastRequest?.opts?.body?.get('temperature') === '0');
+// whisper 完全不做說話者分離，姓名只能靠「說話時間」去對字幕。一次請求的
+// 音訊會被合併到 28 秒，所以必須拿到**每一句**的時間，不然整段 28 秒
+// 都會掛在同一個人頭上。
+check('要求 verbose_json（才拿得到每一句的時間）',
+  lastRequest?.opts?.body?.get('response_format') === 'verbose_json',
+  String(lastRequest?.opts?.body?.get('response_format')));
+check('要求逐句的時間戳',
+  lastRequest?.opts?.body?.get('timestamp_granularities[]') === 'segment',
+  String(lastRequest?.opts?.body?.get('timestamp_granularities[]')));
 check('雲端結果原樣回傳（繁體轉換在 handleResult 才做）',
-  cloudText === ' 这是云端结果 ', `「${cloudText}」`);
+  cloudText?.text === ' 这是云端结果 ', `「${cloudText?.text}」`);
+check('每一句的相對秒數有帶回來',
+  cloudText?.parts?.length === 1 && cloudText.parts[0].start === 0,
+  JSON.stringify(cloudText?.parts));
+
+// verbose_json 的支援不能假設永遠都在（換模型、API 改版都可能讓 segments 消失）。
+// 拿不到就退回整段文字 —— 逐字稿仍然完整，只是姓名的粒度變粗。
+window.fetch = async () => ({
+  ok: true, status: 200, headers: { get: () => null },
+  json: async () => ({ text: '只有整段文字' }),
+});
+const noParts = await groqTranscribe(new Float32Array(160));
+check('沒有 segments 時仍然拿得到整段文字（不能整個壞掉）',
+  noParts?.text === '只有整段文字' && noParts.parts.length === 0,
+  JSON.stringify(noParts));
 
 // 撞到額度不是當機，訊息要分得出來 —— 使用者看到的是逐字稿停住
 window.fetch = async () => ({
@@ -270,6 +297,79 @@ check('節流窗過了就會送出並產生逐字稿',
 check('雲端辨識的段落標成雲端來源',
   sent.find((m) => m.type === 'ma:segment')?.payload.speaker === '其他人（雲端辨識）',
   sent.find((m) => m.type === 'ma:segment')?.payload.speaker);
+
+// ── 一句一段送出，每一句帶自己的說話時間 ────────────────────────
+//
+// 這是「顯示每個人的名字」的關鍵。whisper 不做說話者分離，背景只能拿
+// 說話時間去對字幕記到的人 —— 而雲端這條為了守住 20 RPM 會把音訊合併到
+// 28 秒，28 秒裡換三次人很正常。整塊只送一段的話，三個人的話會全部
+// 掛在同一個人頭上，而畫面上看起來完全正常。
+sent.length = 0;
+lastResultText = '';
+toTraditionalOn = false;
+handleResult({
+  text: '那我開始今天的報告。準備好就可以開始了。那我們先看金流。',
+  parts: [
+    { start: 0, end: 3, text: '那我開始今天的報告。' },
+    { start: 3.5, end: 6, text: '準備好就可以開始了。' },
+    { start: 12.25, end: 15, text: '那我們先看金流。' },
+  ],
+}, 1700000000000);
+const pieces = sent.filter((m) => m.type === 'ma:segment').map((m) => m.payload);
+check('三句話送成三段，不是黏成一段', pieces.length === 3,
+  `${pieces.length} 段：${JSON.stringify(pieces.map((p) => p.text))}`);
+check('每一段的說話時間是「這塊音訊起點 + 該句的相對秒數」',
+  pieces[0]?.startedAt === 1700000000000
+  && pieces[1]?.startedAt === 1700000003500
+  && pieces[2]?.startedAt === 1700000012250,
+  JSON.stringify(pieces.map((p) => p.startedAt)));
+// 同一塊音訊的幾句話會在同一毫秒送出。id 只用 Date.now() 的話它們會拿到
+// 同一個 id，背景的 upsertSegment 會**互相覆蓋**，28 秒最後只剩一句。
+check('每一段的 id 都不同（否則背景會互相覆蓋，只剩最後一句）',
+  new Set(pieces.map((p) => p.id)).size === 3,
+  JSON.stringify(pieces.map((p) => p.id)));
+check('內容照原順序，一句都沒少',
+  pieces.map((p) => p.text).join('') === '那我開始今天的報告。準備好就可以開始了。那我們先看金流。',
+  JSON.stringify(pieces.map((p) => p.text)));
+
+// 上一塊音訊尾巴的重複要扣掉，而且要從**最前面的句子**扣 ——
+// 不然重疊的內容會又出現一次。
+sent.length = 0;
+lastResultText = '前面講完的話結尾在這裡。';
+handleResult({
+  text: '結尾在這裡。這是新的內容。',
+  parts: [
+    { start: 0, end: 2, text: '結尾在這裡。' },
+    { start: 2, end: 4, text: '這是新的內容。' },
+  ],
+}, 1700000100000);
+const dedup = sent.filter((m) => m.type === 'ma:segment').map((m) => m.payload.text);
+check('重疊的開頭被扣掉，不會重複出現',
+  dedup.join('') === '這是新的內容。', JSON.stringify(dedup));
+
+// 整段看起來正常，但其中一句可能是 whisper 的雜訊標記
+sent.length = 0;
+lastResultText = '';
+handleResult({
+  text: '我們開始吧。[BLANK_AUDIO]那就這樣。',
+  parts: [
+    { start: 0, end: 2, text: '我們開始吧。' },
+    { start: 2, end: 4, text: '[BLANK_AUDIO]' },
+    { start: 4, end: 6, text: '那就這樣。' },
+  ],
+}, 1700000200000);
+check('逐句過濾雜訊（整段正常但其中一句是 [BLANK_AUDIO]）',
+  sent.filter((m) => m.type === 'ma:segment').length === 2,
+  JSON.stringify(sent.filter((m) => m.type === 'ma:segment').map((m) => m.payload.text)));
+
+// 本機引擎回的是純字串，那條路不能被改壞
+sent.length = 0;
+lastResultText = '';
+handleResult('本機引擎回的是一整段字串。', 1700000300000);
+check('本機引擎的純字串照舊處理（沒有 parts 也要能用）',
+  sent.filter((m) => m.type === 'ma:segment').length === 1
+  && sent.find((m) => m.type === 'ma:segment')?.payload.text === '本機引擎回的是一整段字串。',
+  JSON.stringify(sent.filter((m) => m.type === 'ma:segment').map((m) => m.payload.text)));
 
 // ── 持續失敗時不要洗版 ──────────────────────────────────────────
 // 辨識錯誤幾乎都是持續性的（金鑰被拒、額度用完、網路斷掉），一旦發生，

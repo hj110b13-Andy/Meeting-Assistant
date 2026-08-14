@@ -442,23 +442,63 @@ async function pump() {
   }
 }
 
+/**
+ * 把辨識結果變成逐字稿段落。
+ *
+ * `raw` 可以是一整段字串（本機引擎），也可以是 `{ text, parts }`（雲端，
+ * parts 帶著每一句的相對秒數）。**有 parts 的時候要一句一段地送出**，
+ * 每一段配上自己的絕對說話時間 —— 背景就能替每一句各自對上正確的姓名。
+ * 全部黏成一段的話，一塊 28 秒的音訊會整段掛在同一個人名下，
+ * 而那 28 秒裡換過三次人是很正常的。
+ */
 function handleResult(raw, startedAt) {
-  const full = String(raw || '').trim();
+  const parts = Array.isArray(raw?.parts) && raw.parts.length ? raw.parts : null;
+  const full = String((raw && raw.text !== undefined ? raw.text : raw) || '').trim();
   if (!full || isNoiseOnly(full)) return;
 
-  let text = stripOverlap(lastResultText, full);
+  const trimmed = stripOverlap(lastResultText, full);
   // 比對用的一律是「這一段的完整結果」，不是切掉之後的 ——
   // 否則下一段會拿被截斷的尾巴去比，重疊就抓不到了。
   lastResultText = full;
-  if (!text) return;
+  if (!trimmed) return;
 
+  if (!parts) {
+    emitPiece(trimmed, startedAt);
+    return;
+  }
+
+  // stripOverlap 砍掉的是**開頭**若干字（上一塊音訊尾巴的重複）。
+  // 同樣的字數要從最前面的 parts 扣掉，否則重疊的內容會又出現一次。
+  let toDrop = full.length - trimmed.length;
+  for (const p of parts) {
+    let text = p.text;
+    if (toDrop > 0) {
+      if (toDrop >= text.length) { toDrop -= text.length; continue; }
+      text = text.slice(toDrop);
+      toDrop = 0;
+    }
+    // 逐句過濾雜訊與幻覺：整段看起來正常，但其中一句可能是 [BLANK_AUDIO]
+    if (!text.trim() || isNoiseOnly(text)) continue;
+    emitPiece(text, startedAt + Math.round(p.start * 1000));
+  }
+}
+
+function emitPiece(text, startedAt) {
   // whisper small 的中文明顯比 base 準，但輸出簡體。在這裡做確定性轉換，
   // 而不是用 initial prompt 引導 —— 實測 prompt 會讓「對帳」變成「對戰」。
+  let out = text.trim();
   if (toTraditionalOn && typeof globalThis.toTraditional === 'function') {
-    text = globalThis.toTraditional(text);
+    out = globalThis.toTraditional(out);
   }
-  emit(`${sessionId}-${Date.now().toString(36)}`, speakerLabel, text, true, startedAt);
+  if (!out) return;
+  // id 要含 startedAt：同一塊音訊會在同一毫秒送出好幾句，只用 Date.now()
+  // 的話它們會拿到同一個 id，背景的 upsertSegment 會把它們**互相覆蓋**，
+  // 28 秒的音訊最後只留下一句。
+  emit(`${sessionId}-${startedAt.toString(36)}-${(pieceSeq++).toString(36)}`,
+    speakerLabel, out, true, startedAt);
 }
+
+let pieceSeq = 0;
 
 // ── 雲端 whisper（GroqCloud） ──────────────────────────────────
 /**
@@ -498,11 +538,29 @@ async function startGroq(streamId, options) {
     + '注意：這條路會把會議音訊送到 Groq 的伺服器辨識。要完全離線請改用本機引擎。');
 }
 
+/**
+ * 打一次 Groq 的辨識，回傳 `{ text, parts }`。
+ *
+ * ## 為什麼要 verbose_json 而不是 json
+ *
+ * whisper **完全不做說話者分離** —— 回來的就是一整段文字。真實姓名只有平台
+ * 字幕有，所以背景會拿「說話時間」去比對字幕記到的人（見 service-worker 的
+ * speakerAt）。問題是一次請求的音訊可能橫跨好幾個人：雲端這條為了守住
+ * 20 RPM 會把相鄰段落合併到 28 秒，28 秒裡換三次人是很正常的。
+ * 只有一個時間點可比對的話，整段 28 秒都會被安到同一個人頭上。
+ *
+ * `verbose_json` ＋ `timestamp_granularities[]=segment` 讓 whisper 把它自己
+ * 切出來的每一句都附上 start／end（相對於這塊音訊的秒數）。加上這塊音訊的
+ * 起始時間就是每一句的**絕對說話時間**，於是每一句都能各自對上正確的人。
+ *
+ * 這不會多花額度也不會慢 —— 同一次請求，只是要求更詳細的回應格式。
+ */
 async function groqTranscribe(audio) {
   const form = new FormData();
   form.append('file', toWavBlob(audio), 'chunk.wav');
   form.append('model', cloudModel);
-  form.append('response_format', 'json');
+  form.append('response_format', 'verbose_json');
+  form.append('timestamp_granularities[]', 'segment');
   form.append('temperature', '0');
   // 指定語言可以省掉模型自己偵測的那一步，也避免中文被誤判成日文
   form.append('language', 'zh');
@@ -530,7 +588,19 @@ async function groqTranscribe(audio) {
     if (!res.ok) throw new Error(`Groq 回應 ${res.status}`);
 
     const json = await res.json();
-    return String(json.text || '');
+    // parts 是「這塊音訊裡的每一句 + 它的相對秒數」。**verbose_json 的支援
+    // 不能假設永遠都在**（換模型、API 改版都可能讓 segments 消失），
+    // 所以拿不到就退回整段文字 —— 逐字稿仍然完整，只是姓名的粒度變粗。
+    const parts = Array.isArray(json.segments)
+      ? json.segments
+          .map((s) => ({
+            text: String(s.text || '').trim(),
+            start: Number(s.start) || 0,
+            end: Number(s.end) || 0,
+          }))
+          .filter((s) => s.text)
+      : [];
+    return { text: String(json.text || ''), parts };
   } catch (err) {
     if (err.name === 'AbortError') throw new Error('雲端辨識逾時（45 秒）');
     throw err;

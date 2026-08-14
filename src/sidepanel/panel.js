@@ -193,6 +193,40 @@ function highlight(text, q) {
   return frag;
 }
 
+/**
+ * 「為什麼每個人都叫『其他人』」的說明。
+ *
+ * 這是使用者第一次看到逐字稿時最可能問的問題，而**答案完全不在畫面上** ——
+ * 語音辨識拿不到姓名（whisper 只有聲音，不做說話者分離），真實姓名只有
+ * 平台自己的字幕有。所以要開字幕，而那是在會議裡、不是在這個擴充功能裡。
+ *
+ * 只在真的用得上的時候出現：正在聽、已經有逐字稿、而且**一個真名都沒有**。
+ * 抓到任何一個真名就表示字幕已經在餵姓名了，這時再提醒只是雜訊。
+ */
+const PLACEHOLDER_SPEAKER = /^其他人/;
+
+const CAPTION_STEPS = {
+  'google-meet': '會議畫面右下角「更多選項」→「開啟字幕」（或直接按 c）',
+  'ms-teams': '會議工具列「更多」→「語言和語音」→「開啟即時字幕」',
+  'jitsi': '會議工具列「更多」→「字幕」',
+};
+
+function nameHint() {
+  const st = state.status || {};
+  if (!st.audioFallback) return null;
+  if (st.captionsFound) return null;
+  // 有任何一段拿到真名就不用提醒了
+  if (state.segments.some((s) => s.source === 'audio' && !PLACEHOLDER_SPEAKER.test(s.speaker))) return null;
+
+  const p = document.createElement('p');
+  p.className = 'empty';
+  const steps = CAPTION_STEPS[st.platform];
+  p.textContent = '說話者顯示「其他人」是因為語音辨識聽不出是誰 —— 真實姓名只有會議自己的字幕有。'
+    + (steps ? `在會議裡開啟字幕就會自動換成真名：${steps}。` : '在會議裡開啟即時字幕就會自動換成真名。')
+    + '（你自己的發言一律標成「我」，不需要字幕。）';
+  return p;
+}
+
 function renderTranscript() {
   const box = $('transcript');
   const q = $('search').value.trim();
@@ -204,11 +238,14 @@ function renderTranscript() {
   if (!rows.length) {
     const p = document.createElement('p');
     p.className = 'empty';
-    // 不要再叫使用者去開字幕 —— 逐字稿來自本機辨識，字幕只是拿來補姓名。
+    // 不要再叫使用者去開字幕 —— 逐字稿來自語音辨識，字幕只是拿來補姓名。
     p.textContent = q
       ? '沒有符合的段落。'
-      : '等待發言…開始說話後約 15 秒會出現逐字稿（本機辨識需要時間）。想讓說話者顯示真名的話，可以在會議裡開啟字幕。';
+      : '等待發言…開始說話後幾秒會出現逐字稿。想讓說話者顯示真名的話，要在會議裡開啟字幕。';
     box.appendChild(p);
+  } else {
+    const hint = nameHint();
+    if (hint) box.appendChild(hint);
   }
 
   let lastSpeaker = null;

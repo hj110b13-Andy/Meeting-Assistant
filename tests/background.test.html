@@ -985,6 +985,65 @@ window.store = window.__module_store;
     !window.__fetches.some((f) => String(f.url || '').includes('api.anthropic.com')),
     JSON.stringify(window.__fetches.map((f) => f.url).filter((u) => u.includes('anthropic'))));
 
+  // ══ 說話者姓名：從字幕借過來，一句一句對 ══════════════════════
+  //
+  // whisper **完全不做說話者分離** —— 回來的就是一整段文字。真實姓名只有
+  // 平台字幕有，所以音訊段落要靠「說話時間」去對字幕記到的人。
+  // 使用者第一眼就會問「為什麼每個人都叫其他人」，答案就在這條路上。
+  const T = 1700000000000;
+  const cap = (id, speaker, text, startedAt, ts) => ({
+    type: 'ma:segment',
+    payload: { id, speaker, text, final: true, ts: ts ?? startedAt, startedAt,
+      source: 'captions', platform: 'google-meet', sessionId: 'sess-name', title: '週會',
+      url: 'https://meet.google.com/name' },
+  });
+  const heard = (id, text, startedAt) => ({
+    type: 'ma:segment',
+    payload: { id, speaker: '其他人（雲端辨識）', text, final: true, ts: Date.now(), startedAt,
+      source: 'audio', platform: 'audio-fallback', sessionId: 'sess-name', title: '音訊備援' },
+  });
+  const speakerOf = (id) => store.getState().segments.find((s) => s.id === id)?.speaker;
+
+  // 字幕先記下「誰在什麼時間區間講話」。音訊在跑的時候字幕不進逐字稿，
+  // 只提供姓名 —— 所以要先讓狀態變成聆聽中。
+  await send(cap('c-init', 'Eden', '開場', T - 60000));
+  await settle();
+  store.setStatus({ audioFallback: true });
+
+  // Eden 講了 8 秒（字幕會被串流改寫，同一句定稿多次 → 區間會被延長）
+  await send(cap('c1', 'Eden', '那我開始今天的報告', T, T + 4000));
+  await send(cap('c1', 'Eden', '那我開始今天的報告，先看第一頁', T, T + 8000));
+  // 換人
+  await send(cap('c2', 'Mei', '準備好就可以開始了', T + 12000, T + 15000));
+  await settle();
+
+  // 一塊 28 秒的音訊被切成三句，每句帶自己的絕對說話時間
+  await send(heard('a1', '那我開始今天的報告，先看第一頁。', T + 1000));
+  await send(heard('a2', '這一頁是上週的數字。', T + 6000));
+  await send(heard('a3', '準備好就可以開始了。', T + 13000));
+  await settle();
+
+  check('落在 Eden 區間裡的那句掛給 Eden', speakerOf('a1') === 'Eden', speakerOf('a1'));
+  // 這一句在 Eden 那段話的第 6 秒 —— 只記「時間點」的舊做法會因為離 Mei
+  // 的起點比較近而掛錯人，記「區間」才對得起來。
+  check('同一個人講了 8 秒，後半段仍然掛給他（區間比對，不是找最近的點）',
+    speakerOf('a2') === 'Eden', speakerOf('a2'));
+  check('換人之後的那句掛給 Mei', speakerOf('a3') === 'Mei', speakerOf('a3'));
+
+  // 離所有區間都太遠就寧可留佔位標籤。掛錯人在畫面上看起來完全正常，
+  // 只有當事人自己看得出不對，而摘要與回答建議已經被帶歪了。
+  await send(heard('a4', '這是很久以後才說的話。', T + 120000));
+  await settle();
+  check('離所有字幕都太遠時不硬掛，保留佔位標籤',
+    speakerOf('a4') === '其他人（雲端辨識）', speakerOf('a4'));
+
+  // 選擇器失效時「說話者」會抓到介面文字，那絕對不能被安到某段音訊頭上
+  await send(cap('c3', 'arrow_drop_down', '展開', T + 200000, T + 200000));
+  await send(heard('a5', '這句話沒有可信的姓名來源。', T + 200500));
+  await settle();
+  check('字幕抓到介面文字時不會被當成人名',
+    speakerOf('a5') === '其他人（雲端辨識）', speakerOf('a5'));
+
   // ── 手動「產生重點」提早返回時也要收尾 ────────────────────────
   //
   // 側邊欄按下「✦ 產生重點」時會**先**把按鈕切成「產生中…」並停用，再送訊息

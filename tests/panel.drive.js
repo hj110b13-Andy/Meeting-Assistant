@@ -231,6 +231,46 @@
   check('沒有逐字稿時「產生重點」是停用的',
     document.querySelector('#btnSummary').disabled);
 
+  // ── 「為什麼每個人都叫其他人」要看得到答案 ──────────────────────
+  //
+  // 這是使用者第一眼就會問的問題，而答案完全不在畫面上：語音辨識拿不到
+  // 姓名（whisper 不做說話者分離），真實姓名只有平台字幕有 ——
+  // 而開字幕是在會議裡，不是在這個擴充功能裡。沒說的話使用者只會以為壞了。
+  const heardSeg = (id, speaker, text) => ({
+    id, speaker, text, ts: now, startedAt: now, final: true, source: 'audio',
+  });
+  emit('state', {
+    meeting: { sessionId: 's2', platform: 'google-meet', title: '產品週會', url: 'x', startedAt: now },
+    status: { platform: 'google-meet', audioFallback: true, captionsFound: false },
+    segments: [heardSeg('h1', '其他人（雲端辨識）', '那我開始今天的報告。')],
+    partials: [], summary: null, answers: [],
+  });
+  await tick();
+  check('沒有真名時說明為什麼，而且給出這個平台的具體步驟',
+    txt('#transcript').includes('真實姓名只有會議自己的字幕有')
+    && txt('#transcript').includes('開啟字幕'),
+    txt('#transcript').slice(0, 160));
+
+  // 已經抓到真名就不要再提醒 —— 那只是雜訊
+  emit('state', {
+    meeting: { sessionId: 's2', platform: 'google-meet', title: '產品週會', url: 'x', startedAt: now },
+    status: { platform: 'google-meet', audioFallback: true, captionsFound: true },
+    segments: [heardSeg('h2', 'Eden', '那我開始今天的報告。'), heardSeg('h3', 'Mei', '準備好就可以開始了。')],
+    partials: [], summary: null, answers: [],
+  });
+  await tick();
+  check('已經有真名時不再提醒開字幕',
+    !txt('#transcript').includes('真實姓名只有會議自己的字幕有'),
+    txt('#transcript').slice(0, 120));
+  // 這才是使用者要的樣子：一句一個人，名字各自標出來
+  check('不同的說話者各自顯示自己的名字',
+    txt('#transcript').includes('Eden') && txt('#transcript').includes('Mei'),
+    txt('#transcript').slice(0, 120));
+  check('兩個人用不同的顏色（同一人永遠同色）',
+    document.querySelectorAll('#transcript .who').length === 2
+    && new Set([...document.querySelectorAll('#transcript .who')].map((e) => e.style.color)).size === 2,
+    [...document.querySelectorAll('#transcript .who')].map((e) => `${e.textContent}=${e.style.color}`).join(' '));
+
   // ── 開始聆聽之後的說明：每個引擎都要有自己的分支 ────────────────
   //
   // 踩過一次：預設引擎從本機換成 groq 之後忘了加分支，於是**所有正常設定好

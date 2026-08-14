@@ -286,9 +286,35 @@ cloudModel = 'whisper-large-v3-turbo';
 cloudPrompt = '以下是繁體中文（台灣）的會議逐字稿。';
 step('上傳 16.6 秒音訊到 Groq 辨識（這一步最久）');
 const raw = await groqTranscribe(audio);      // offscreen.js 的真函式
-const text = globalThis.toTraditional ? globalThis.toTraditional(raw) : raw;
+const text = globalThis.toTraditional ? globalThis.toTraditional(raw.text) : raw.text;
 
-check('雲端辨識打得通', !!raw.trim(), JSON.stringify(raw));
+check('雲端辨識打得通', !!raw.text.trim(), JSON.stringify(raw).slice(0, 200));
+
+// ── 逐句時間戳：「顯示每個人的名字」整條路的地基 ──────────────
+//
+// whisper 完全不做說話者分離，姓名只能靠說話時間去對平台字幕。雲端這條
+// 為了守住 20 RPM 會把音訊合併到 28 秒，所以必須拿到**每一句**的時間 ——
+// 只有整段的話，28 秒裡三個人講的話會全部掛在同一個人頭上。
+//
+// **這是只有打真的 API 才驗得到的事。** 合成測試裡 segments 是我們自己
+// 塞的，Groq 哪天不回這個欄位、或欄位改名，合成測試照樣全綠，
+// 而程式會安靜地退回「整段一個名字」—— 沒有錯誤、沒有紅字。
+check('verbose_json 真的回得出逐句的 segments',
+  Array.isArray(raw.parts) && raw.parts.length > 0,
+  `parts=${JSON.stringify(raw.parts).slice(0, 200)}`);
+check('每一句都有 start／end（秒）',
+  raw.parts.every((p) => Number.isFinite(p.start) && Number.isFinite(p.end)),
+  JSON.stringify(raw.parts.slice(0, 3)));
+// 16.6 秒的會議錄音一定不只一句話。只回一句表示切分沒有生效，
+// 那麼「一句一個說話者」就完全沒有作用。
+check('16.6 秒的錄音被切成多句（否則姓名的粒度等於沒改善）',
+  raw.parts.length > 1, `只有 ${raw.parts.length} 句`);
+check('時間是遞增的，而且沒有超出音訊長度',
+  raw.parts.every((p, i) => p.start <= p.end && (i === 0 || p.start >= raw.parts[i - 1].start))
+  && raw.parts[raw.parts.length - 1].end <= 20,
+  JSON.stringify(raw.parts.map((p) => [p.start, p.end])));
+results.push('      [逐句切分] ' + raw.parts.length + ' 句：'
+  + raw.parts.map((p) => `${p.start.toFixed(1)}s ${p.text.trim().slice(0, 12)}`).join(' ｜ '));
 // 這幾個詞是本機 base 模型全部聽錯、small 才對的 —— 拿來當品質的實測基準
 check('聽對「這季」', text.includes('這季'), text);
 check('聽對「結帳」', text.includes('結帳'), text);
