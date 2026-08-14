@@ -122,6 +122,20 @@ Chrome 保留 `_` 開頭給自己（`_metadata`、`_locales`）。資料夾裡�
 **這就是原生辨識裝在 `%LOCALAPPDATA%\MeetingAssistant\whisper` 而不是專案裡的原因。**
 `tools\install-whisper.ps1` 會檢查路徑是不是純 ASCII。不要把它搬進專案資料夾。
 
+### 4.5 PowerShell 讀原生程式的輸出會用 CP950 解碼
+
+`$out = & curl.exe …` 這種寫法，PowerShell 5.1 是用**主控台的字碼頁**
+（正體中文機器是 CP950）去解碼那支程式的 stdout。對方吐 UTF-8 的話，
+中文會整片變成亂碼 —— 而且**字串長度也對不上**，所以後續任何比對都會失敗。
+
+踩過的實例：`run-cloud-check.ps1` 用 curl 驗 Groq 串流，「內容是不是繁體」
+那一項一直失敗，失敗訊息看起來像模型吐了亂碼，實際上模型完全正常。
+
+**輸出寫進檔案，再用 `[IO.File]::ReadAllText($f, [Text.UTF8Encoding]::new($false))`
+讀回來。** 送進去的方向也一樣：body 用 `--data-binary "@檔案"`，
+不要用 `-d "字串"`（見下面 host.bat 那條，以及 bench 腳本裡 `Invoke-RestMethod`
+要自己把 body 轉成 UTF-8 位元組的說明）。
+
 ### 5. 測試 Native Messaging 時的 BOM 陷阱
 
 讀取 `Process.StandardInput.BaseStream` 這個**屬性**會 flush 那個 StreamWriter，

@@ -109,10 +109,17 @@ $streamBody = @{
 } | ConvertTo-Json -Depth 5 -Compress
 [IO.File]::WriteAllText($bodyFile, $streamBody, [Text.UTF8Encoding]::new($false))
 
-# -N 關掉緩衝，才看得出「一塊一塊回來」而不是一次收完
-$raw = & $curl -s -N -m 60 'https://api.groq.com/openai/v1/chat/completions' `
+# -N 關掉緩衝，才看得出「一塊一塊回來」而不是一次收完。
+#
+# **輸出一定要寫檔再用 UTF-8 讀回來，不能直接接 `$raw = & curl …`。**
+# PowerShell 5.1 讀原生程式的 stdout 時用主控台的字碼頁（正體中文機器是
+# CP950）解碼，UTF-8 的中文會整片變成亂碼 —— 然後「內容是不是繁體」
+# 這種比對就必然失敗，而失敗訊息看起來像模型吐了亂碼，完全指錯方向。
+$rawFile = Join-Path $tmp 'stream-raw.txt'
+& $curl -s -N -m 60 -o $rawFile 'https://api.groq.com/openai/v1/chat/completions' `
   -H "Authorization: Bearer $($keys.groq)" -H 'Content-Type: application/json' `
   -H 'Accept: text/event-stream' --data-binary "@$bodyFile" 2>$null
+$raw = if (Test-Path $rawFile) { [IO.File]::ReadAllText($rawFile, [Text.UTF8Encoding]::new($false)) } else { '' }
 
 $dataLines = @($raw -split "`n" | Where-Object { $_ -match '^data:\s*\{' })
 # 不要把 foreach 敘述直接接到管線 —— PowerShell 5.1 會報
@@ -134,7 +141,7 @@ if ($joined) {
   Write-Host ("      [串流 llama-3.3-70b-versatile：{0} 塊] {1}…" -f $deltas.Count,
     ($joined -replace '\s+', ' ').Substring(0, [Math]::Min(70, ($joined -replace '\s+', ' ').Length))) -ForegroundColor DarkGray
 }
-Remove-Item $bodyFile -Force -ErrorAction SilentlyContinue
+Remove-Item $bodyFile, $rawFile -Force -ErrorAction SilentlyContinue
 Write-Host ''
 
 # ── 準備待測檔案（跟 run.ps1 同樣的模組轉換）────────────────────
